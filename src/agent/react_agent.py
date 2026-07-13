@@ -1,4 +1,4 @@
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from src.config.settings import settings
 from src.tool.tavily_search import tavily_search
@@ -20,4 +20,4 @@ def build_react_agent():
         streaming=True,
     )
     tools = [tavily_search]
-    return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
+    return create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
