@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"  # LLM API 地址（兼容 OpenAI 协议）
     llm_model: str = "gpt-4o"  # 默认模型名称
 
+    # 视觉模型配置（图片识别）
+    vision_model: str = "qwen3.7-plus"  # 多模态视觉模型名称，设为空字符串则禁用图片识别
+
     # 搜索配置
     tavily_api_key: str = ""  # Tavily 搜索 API 密钥
 

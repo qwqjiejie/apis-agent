@@ -29,7 +29,7 @@ def parse_file(file_path: str, filename: str) -> str | None:
         elif ext == "txt":
             return _parse_txt(file_path)
         else:
-            return None
+            return _parse_image(file_path)
     except Exception as e:
         logger.error(f"解析文件失败 {filename}: {e}")
         return None
@@ -56,3 +56,8 @@ def _parse_docx(file_path: str) -> str:
 def _parse_txt(file_path: str) -> str:
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()[:MAX_TEXT_LENGTH]
+
+
+def _parse_image(file_path: str) -> str | None:
+    from src.dodo_agent.tool.image_recognition import recognize_image
+    return recognize_image(file_path)

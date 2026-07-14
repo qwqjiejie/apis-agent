@@ -69,7 +69,8 @@ class FileService:
         if self._minio:
             try:
                 self._ensure_bucket()
-                obj_name = f"{file_id}/{original_name}"
+                date_prefix = datetime.now().strftime("%Y-%m-%d")
+                obj_name = f"upload_file/{date_prefix}/{original_name}"
                 self._minio.put_object(
                     settings.minio_bucket, obj_name,
                     data=io.BytesIO(content), length=file_size,
