@@ -16,6 +16,18 @@ class Settings(BaseSettings):
     mysql_user: str = "root"
     mysql_pass: str = ""
     mysql_db: str = "dodo"
+    minio_endpoint: str = ""
+    minio_access_key: str = ""
+    minio_secret_key: str = ""
+    minio_bucket: str = "dodo"
+    upload_dir: str = "uploads"
+    milvus_host: str = ""
+    milvus_port: int = 19530
+    milvus_user: str = ""
+    milvus_pass: str = ""
+    milvus_db: str = "default"
+    embedding_model: str = "text-embedding-v4"
+    embedding_dim: int = 1024
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

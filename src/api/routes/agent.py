@@ -8,7 +8,9 @@ from sse_starlette.sse import EventSourceResponse
 from fastapi.responses import JSONResponse
 from langchain_openai import ChatOpenAI
 
-from src.agent.react_agent import build_react_agent
+from src.agent.react_agent import build_react_agent, build_skills_agent
+from src.api.file_service import file_service
+from src.api.rag_service import build_context
 from src.api.session import store
 from src.common.logger import logger
 from src.config.settings import settings
@@ -52,14 +54,26 @@ async def _generate_recommend(question: str, answer: str) -> str:
         return "[]"
 
 
-async def stream_agent(conversation_id: str, query: str, file_id: str = ""):
+async def stream_agent(conversation_id: str, query: str, file_id: str = "", agent_type: str = "chat"):
     cancel_event = asyncio.Event()
     _running_tasks[conversation_id] = cancel_event
 
-    agent = build_react_agent()
+    builder = build_skills_agent if agent_type == "skills" else build_react_agent
+    agent = builder()
     history = store.load_history(conversation_id, limit=settings.max_history_rounds)
     history_msgs = _build_history_messages(history)
-    inputs = {"messages": history_msgs + [("user", query)]}
+
+    file_context = ""
+    if file_id:
+        content = file_service.get_content(file_id)
+        if content and content.get("extractedText"):
+            ctx = build_context(query, file_id, content["extractedText"])
+            if ctx:
+                file_context = (
+                    f"\n\n【参考以下文件内容回答问题，优先基于文件内容作答，若文件内容不足以回答再结合搜索】\n\n{ctx}"
+                )
+
+    inputs = {"messages": history_msgs + [("user", query + file_context)]}
 
     final_text = ""
     references = []
@@ -184,7 +198,7 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = ""):
         reference=json.dumps(references, ensure_ascii=False),
         recommend=recommend_json,
         tools=",".join(tools_used),
-        agent_type="chat",
+        agent_type=agent_type,
         fileid=file_id,
     )
 
@@ -244,7 +258,7 @@ async def agent_skills_stream(
         fileId: str = Query(default=""),
 ):
     async def event_generator():
-        async for payload in stream_agent(conversationId, query, fileId):
+        async for payload in stream_agent(conversationId, query, fileId, agent_type="skills"):
             yield payload
 
     return EventSourceResponse(event_generator())
