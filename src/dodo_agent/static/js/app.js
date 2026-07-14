@@ -221,17 +221,18 @@ createApp({
         };
 
         // ===== 消息发送和流式处理 =====
-        const sendMessage = async () => {
+        const sendMessage = async (presetMessage = null) => {
             if (isSending.value || isUploading.value) return;
-            if (!inputMessage.value.trim() && !selectedFile.value) return;
 
-            clearAllRecommendQuestions();
-            const message = inputMessage.value.trim();
+            const message = presetMessage || inputMessage.value.trim();
+            if (!message && !selectedFile.value) return;
             const hasFile = !!selectedFile.value;
             currentRecommendMsgId.value = null;
             isSending.value = true;
 
-            inputMessage.value = '';
+            if (!presetMessage) {
+                inputMessage.value = '';
+            }
             const fileToSend = selectedFile.value;
             const fileIdToSend = uploadedFileId.value;
             if (textareaInput.value) {
@@ -516,7 +517,6 @@ createApp({
                     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
                 }
             } else if (data.type === STREAM_TYPES.COMPLETE) {
-                // 流式输出完成后，有 error 时保持 timeline 展开，否则折叠
                 const hasError = aiMsg.timeline.some(t => t.type === 'error');
                 aiMsg.showTimeline = hasError;
                 isSending.value = false;
@@ -570,9 +570,8 @@ createApp({
         };
 
         const sendRecommendQuestion = (question) => {
-            clearAllRecommendQuestions();
-            inputMessage.value = question;
-            sendMessage();
+            if (isSending.value || isUploading.value) return;
+            sendMessage(question);
         };
 
         const createNewChat = async () => {

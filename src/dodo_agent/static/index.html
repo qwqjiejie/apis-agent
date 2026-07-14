@@ -92,13 +92,13 @@
                             </div>
 
                             <!-- Copy 按钮 -->
-                            <div v-if="msg.role === 'user'" class="copy-btn copy-btn-user" @click="copyMessage(msg)">
+                            <div v-if="msg.role === 'user' && !isSending" class="copy-btn copy-btn-user" @click="copyMessage(msg)">
                                 <i v-if="!msg.copied" class="fas fa-copy"></i>
                                 <i v-else class="fas fa-check"></i>
                             </div>
 
                             <!-- AI 消息 -->
-                            <div v-else class="ai-message">
+                            <div v-if="msg.role === 'assistant'" class="ai-message">
                                 <!-- 思考过程（思考+工具调用统一时间线） -->
                                 <div v-if="msg.timeline && msg.timeline.length > 0" class="timeline-section">
                                     <div class="timeline-header" @click="toggleTimeline(msg.id)">
@@ -141,8 +141,8 @@
                                 <!-- 文本内容 -->
                                 <div class="text-content markdown-body" v-html="renderMarkdown(msg.content)"></div>
 
-                                <!-- 加载动画 -->
-                                <div v-if="isSending && isLastMessage(msg)" class="thinking-loading">
+                                <!-- 加载动画：仅在没有文本内容时显示 -->
+                                <div v-if="isSending && isLastMessage(msg) && !msg.content" class="thinking-loading">
                                     <span class="dot"></span>
                                     <span class="dot"></span>
                                     <span class="dot"></span>
@@ -199,8 +199,8 @@
                                     </a>
                                 </div>
 
-                                <!-- Copy 按钮 -->
-                                <div class="copy-btn" @click="copyMessage(msg)">
+                                <!-- Copy 按钮，流式输出完成后再显示 -->
+                                <div v-if="!isSending" class="copy-btn" @click="copyMessage(msg)">
                                     <i v-if="!msg.copied" class="fas fa-copy"></i>
                                     <i v-else class="fas fa-check"></i>
                                 </div>
@@ -264,7 +264,7 @@
                         <!-- 输入框 -->
                         <textarea v-model="inputMessage"
                                   :placeholder="selectedAgent === 'file' && selectedFile ? '文件问答模式... (删除文件可切换回对话助手)' : '输入消息... (支持 Markdown，Shift+Enter 换行)'"
-                                  @keydown.enter.exact.prevent="sendMessage"
+                                  @keydown.enter.exact.prevent="sendMessage()"
                                   @keydown.enter.shift.exact="inputMessage += '\n'"
                                   rows="1"
                                   ref="textareaInput"></textarea>

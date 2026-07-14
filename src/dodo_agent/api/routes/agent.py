@@ -6,7 +6,6 @@ import time
 from fastapi import APIRouter, Query
 from sse_starlette.sse import EventSourceResponse
 from fastapi.responses import JSONResponse
-from langchain_openai import ChatOpenAI
 
 from src.dodo_agent.agent.react_agent import build_react_agent, build_skills_agent
 from src.dodo_agent.api.file_service import file_service
@@ -16,13 +15,7 @@ from src.dodo_agent.common.logger import logger
 from src.dodo_agent.config.settings import settings
 
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-
-_recommend_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.llm_api_key,
-    base_url=settings.llm_base_url,
-    temperature=0.7,
-)
+RECOMMEND_PATTERN = re.compile(r"<recommend>(.*?)</recommend>", re.DOTALL)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -36,23 +29,6 @@ def _build_history_messages(history: list[dict]) -> list:
         if h.get("answer"):
             msgs.append(("assistant", h["answer"]))
     return msgs
-
-
-def _generate_recommend(question: str, answer: str) -> str:
-    if not answer.strip():
-        return "[]"
-    prompt = f"""基于以下对话，生成3个用户可能继续问的推荐问题。
-            用户问题：{question[:300]}
-            AI回答：{answer[:500]}
-            请只返回JSON数组格式，不要其他内容。例如：["问题1", "问题2", "问题3"]"""
-    try:
-        resp = _recommend_llm.invoke(prompt)
-        text = resp.content.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("\n", 1)[0] if text.endswith("```") else text.split("\n", 1)[1]
-        return text
-    except Exception:
-        return "[]"
 
 
 async def stream_agent(conversation_id: str, query: str, file_id: str = "", agent_type: str = "chat"):
@@ -81,10 +57,11 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
     thinking_parts: list[str] = []
     tools_used = set()
     think_buffer = ""
+    recommend_buffer = ""
+    recommend_json = ""
     t0 = time.time()
     first_token_sent = False
     first_response_ms = 0
-    recommend_task: asyncio.Task | None = None
 
     try:
         async for chunk in agent.astream_events(inputs, version="v2"):
@@ -162,13 +139,32 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
                         think_buffer = think_buffer[tag_pos:]
                     else:
                         if think_buffer:
-                            final_text += think_buffer
-                            if not first_token_sent:
-                                first_response_ms = int((time.time() - t0) * 1000)
-                                first_token_sent = True
-                            yield {"event": "message", "data": json.dumps(
-                                {"type": "text", "content": think_buffer}, ensure_ascii=False)}
+                            if recommend_buffer:
+                                recommend_buffer += think_buffer
+                            elif "<recommend" in think_buffer:
+                                idx = think_buffer.find("<recommend")
+                                text_part = think_buffer[:idx]
+                                if text_part:
+                                    final_text += text_part
+                                    if not first_token_sent:
+                                        first_response_ms = int((time.time() - t0) * 1000)
+                                        first_token_sent = True
+                                    yield {"event": "message", "data": json.dumps(
+                                        {"type": "text", "content": text_part}, ensure_ascii=False)}
+                                recommend_buffer += think_buffer[idx:]
+                            else:
+                                final_text += think_buffer
+                                if not first_token_sent:
+                                    first_response_ms = int((time.time() - t0) * 1000)
+                                    first_token_sent = True
+                                yield {"event": "message", "data": json.dumps(
+                                    {"type": "text", "content": think_buffer}, ensure_ascii=False)}
                         think_buffer = ""
+                        if recommend_buffer and "</recommend>" in recommend_buffer:
+                            m = RECOMMEND_PATTERN.search(recommend_buffer)
+                            if m:
+                                recommend_json = m.group(1).strip()
+                            recommend_buffer = ""
 
     except asyncio.CancelledError:
         yield {"event": "message", "data": json.dumps({"type": "error", "content": "任务已取消"}, ensure_ascii=False)}
@@ -177,9 +173,11 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
     finally:
         _running_tasks.pop(conversation_id, None)
 
-    recommend_task = asyncio.create_task(
-        asyncio.to_thread(_generate_recommend, query, final_text)
-    )
+    if recommend_buffer:
+        m = RECOMMEND_PATTERN.search(recommend_buffer)
+        if m and not recommend_json:
+            recommend_json = m.group(1).strip()
+        recommend_buffer = ""
 
     if think_buffer.strip():
         clean = THINK_PATTERN.sub("", think_buffer).strip()
@@ -191,13 +189,13 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
         first_response_ms = int((time.time() - t0) * 1000)
     total_ms = int((time.time() - t0) * 1000)
 
-    try:
-        recommend_json = await asyncio.wait_for(recommend_task, timeout=15)
-    except asyncio.TimeoutError:
+    if not recommend_json:
+        m = RECOMMEND_PATTERN.search(final_text)
+        if m:
+            recommend_json = m.group(1).strip()
+            final_text = RECOMMEND_PATTERN.sub("", final_text).strip()
+    if not recommend_json:
         recommend_json = "[]"
-    yield {"event": "message", "data": json.dumps({"type": "recommend", "content": recommend_json}, ensure_ascii=False)}
-    yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
-    yield {"event": "message", "data": "[DONE]"}
 
     store.save_message(
         session_id=conversation_id,
@@ -210,6 +208,10 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
         agent_type=agent_type,
         fileid=file_id,
     )
+
+    yield {"event": "message", "data": json.dumps({"type": "recommend", "content": recommend_json}, ensure_ascii=False)}
+    yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
+    yield {"event": "message", "data": "[DONE]"}
 
 
 @router.get("/chat/stream")
