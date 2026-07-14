@@ -373,12 +373,16 @@ async def agent_pptx_stream(query: str = Query(...), conversationId: str = Query
 
 
 @router.get("/deep/stream")
-async def agent_deep_stream(query: str = Query(...), conversationId: str = Query(...)):
+async def agent_deep_stream(
+        query: str = Query(...),
+        conversationId: str = Query(...),
+        fileId: str = Query(default=""),
+):
+    from src.dodo_agent.agent.deep_research import deep_research_stream
+
     async def event_generator():
-        yield {"event": "message",
-               "data": json.dumps({"type": "error", "content": "深度研究功能尚未实现"}, ensure_ascii=False)}
-        yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
-        yield {"event": "message", "data": "[DONE]"}
+        async for payload in deep_research_stream(conversationId, query, fileId):
+            yield payload
 
     return EventSourceResponse(event_generator())
 

@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # 任务控制配置
     task_lock_timeout_seconds: int = 300  # 会话级分布式锁 TTL，防止同会话并发执行
 
+    # 深度研究配置
+    deep_research_max_concurrency: int = 3  # 子任务最大并发数
+    deep_research_max_iterations: int = 3  # Plan-Critique 循环最大迭代次数
+    deep_research_max_sub_tasks: int = 6  # 每轮子研究主题最大数量
+
     # 上下文压缩配置
     compression_enabled: bool = True  # 是否启用上下文压缩
     compression_layer_1_keep_recent_rounds: int = 2  # Layer 1 压缩保留最近 N 轮完整内容
