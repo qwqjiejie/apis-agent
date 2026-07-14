@@ -40,15 +40,15 @@
 | 编号 | 功能 | 状态 | 描述 |
 |------|------|------|------|
 | F-14 | 任务停止 | 已完成 | 用户可随时停止正在执行的 Agent，支持 asyncio.Event 本地直停 + Redis Pub/Sub 跨实例广播。Redis 不可用时自动降级为纯本地模式 |
-| F-15 | 任务并发控制 | 未实现 | 基于 Redis 分布式锁的会话级任务去重，同一会话不允许同时执行多个 Agent |
-| F-16 | 优雅中断 | 未实现 | Reactor Disposable 机制确保子任务链完全取消 |
+| F-15 | 任务并发控制 | 已完成 | 基于 Redis 分布式锁 (SETNX) 的会话级任务去重，同一会话不允许同时执行多个 Agent。Redis 不可用时降级为本地字典判断 |
+| F-16 | 优雅中断 | 已完成 | asyncio task 封装 agent 执行，取消时 CancelledError 传播到 langgraph 内部自动清理子任务。bash_tool 改用 asyncio subprocess，取消时 kill 子进程 |
 
 ### 5. 流式输出功能
 
 | 编号 | 功能 | 状态 | 描述 |
 |------|------|------|------|
 | F-17 | SSE 流式响应 | 已完成 | 所有 Agent 统一使用 SSE (text/event-stream) 输出 |
-| F-18 | 思考过程展示 | 已完成 | `<think>` 标签解析，思考内容（thinking）和最终答案（text）分离输出 |
+| F-18 | 思考过程展示 | 已完成 | `reasoning_content` 字段（DeepSeek 等推理模型）+ `<think>` 标签双重解析，思考内容（thinking）和最终答案（text）分离输出。通过 `ChatOpenAIWithReasoning` 子类注入 `additional_kwargs`，解决 langchain-openai 丢弃非标准字段的问题 |
 | F-19 | 工具调用追踪 | 已完成 | tool_start / tool_end 事件实时展示工具调用状态 |
 | F-20 | 参考来源 | 已完成 | reference 类型消息，展示搜索结果的 URL/标题 |
 | F-21 | 推荐问题 | 已完成 | 每轮对话结束自动生成 3 个推荐问题 |
@@ -57,9 +57,9 @@
 
 | 编号 | 功能 | 状态 | 描述 |
 |------|------|------|------|
-| F-22 | 上下文压缩 (Layer 1) | 未实现 | 每轮自动压缩旧工具结果和长参数为占位符 |
-| F-23 | 上下文压缩 (Layer 2) | 未实现 | Token 超过阈值后 LLM 摘要压缩所有旧消息 |
-| F-24 | Token 估算 | 未实现 | TokenEstimator 估算消息列表 token 数 |
+| F-22 | 上下文压缩 (Layer 1) | 已完成 | 保留最近 N 轮完整内容，旧搜索工具结果替换为占位符，长回答截断。仅对搜索类工具(SEARCH_RESULTS/SOURCES)做占位符，文件 RAG 场景保留 |
+| F-23 | 上下文压缩 (Layer 2) | 已完成 | Token 超过 max_context_tokens * 75% 时触发 LLM 摘要压缩。后台异步执行（`asyncio.create_task`），不阻塞主流程首 token 延迟 |
+| F-24 | Token 估算 | 已完成 | 基于 tiktoken o200k_base 编码估算消息列表 token 数，支持 OpenAI 格式消息和自定义模型 |
 
 ### 7. 工具集功能
 
@@ -138,7 +138,7 @@ public abstract class BaseAgent {
 5. 达到最大轮次时强制总结输出
 
 关键技术点：
-- **ThinkTagParser**: 实时解析 `<think>` 标签，分离思考内容和最终回答
+- **ThinkTagParser**: 实时解析 `<think>` 标签，分离思考内容和最终回答。Python 版通过 `ChatOpenAIWithReasoning` 子类额外支持 `reasoning_content` 字段（DeepSeek 等推理模型原生输出），覆盖更多模型格式
 - **并发工具执行**: 使用 Schedulers.boundedElastic() 并行调度多工具
 - **工具响应排序**: ConcurrentHashMap + 原始顺序重组，保证工具响应顺序正确
 - **流式错误恢复**: `onErrorResume` 实现 LLM 调用失败重试（最多 3 次）
@@ -298,7 +298,7 @@ src/main/java/cn/hollis/llm/mentor/agent/
 2. **分层抽象**: Controller -> Agent -> Service -> Tool -> Infrastructure，职责清晰
 3. **统一协议**: 所有 Agent 共享 SSE 流式响应格式和 BaseAgent 基类
 4. **分布式就绪**: Redis 分布式锁实现跨实例任务互斥和 Pub/Sub 停止广播
-5. **上下文管理**: 双层压缩策略（micro compact + auto compact），支持超长对话
+5. **上下文管理**: 双层压缩策略（Layer 1 占位符截断 + Layer 2 LLM 摘要），Layer 2 后台异步执行不阻塞首 token。
 6. **断点续传**: PPT 状态机支持任意状态中断后恢复
 7. **并发控制**: Semaphore 控制深度研究的工具调用并发度
 8. **插件化工具**: MCP 协议实现工具热插拔，Skills 体系支持动态加载
@@ -334,10 +334,10 @@ H5 前端页面已复制到 `src/main/resources/static/` 目录下：
 | 核心对话功能 | 3 (F-01~02, F-05) | 0 | 2 (F-03~04) | 5 |
 | 会话管理功能 | 3 (F-06~08) | 0 | 0 | 3 |
 | 文件管理功能 | 4 (F-09~10, F-12~13) | 0 | 1 (F-11) | 5 |
-| Agent 控制功能 | 1 (F-14) | 0 | 2 (F-15, F-16) | 3 |
+| Agent 控制功能 | 3 (F-14~16) | 0 | 0 | 3 |
 | 流式输出功能 | 5 (F-17~21) | 0 | 0 | 5 |
-| 上下文管理功能 | 0 | 0 | 3 (F-22~24) | 3 |
+| 上下文管理功能 | 3 (F-22~24) | 0 | 0 | 3 |
 | 工具集功能 | 5 (F-25~29) | 0 | 0 | 5 |
-| **合计** | **21** | **0** | **7** | **29** |
+| **合计** | **26** | **0** | **2** | **29** |
 
-**进度: 21/29 已完成 (72%)**
+**进度: 26/29 已完成 (90%)**

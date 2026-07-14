@@ -7,13 +7,15 @@ from fastapi import APIRouter, Query
 from sse_starlette.sse import EventSourceResponse
 from fastapi.responses import JSONResponse
 
-from src.dodo_agent.agent.react_agent import build_react_agent, build_skills_agent
+from src.dodo_agent.agent.react_agent import build_llm, build_react_agent, build_skills_agent
 from src.dodo_agent.api.file_service import file_service
 from src.dodo_agent.api.rag_service import build_context
 from src.dodo_agent.api.session import store
 from src.dodo_agent.common.logger import logger
-from src.dodo_agent.common.redis import listen_stop, publish_stop
+from src.dodo_agent.common.redis import acquire_lock, listen_stop, publish_stop, release_lock
 from src.dodo_agent.config.settings import settings
+from src.dodo_agent.context.compressor import compress_layer_1, compress_layer_2
+from src.dodo_agent.context.token_counter import estimate_messages_tokens
 
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 RECOMMEND_PATTERN = re.compile(r"<recommend>(.*?)</recommend>", re.DOTALL)
@@ -32,7 +34,90 @@ def _build_history_messages(history: list[dict]) -> list:
     return msgs
 
 
+class _AgentStopped(Exception):
+    pass
+
+
+async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event):
+    """F-16: 将 agent 流式执行放入独立 task，支持 CancelledError 传播到 langgraph 内部。
+
+    使用 asyncio.Queue 解耦 agent 执行与取消监听。
+    正常 chunks 通过 yield 返回，取消/结束通过 _AgentStopped 异常通知调用方。
+    """
+    chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+
+    async def run_agent():
+        try:
+            async for chunk in agent.astream_events(inputs, version="v2"):
+                await chunk_queue.put(("chunk", chunk))
+            await chunk_queue.put(("done", None))
+        except asyncio.CancelledError:
+            await chunk_queue.put(("cancelled", None))
+        except Exception as e:
+            await chunk_queue.put(("error", str(e)))
+
+    agent_task = asyncio.create_task(run_agent())
+
+    try:
+        while True:
+            get_task = asyncio.create_task(chunk_queue.get())
+            watch_task = asyncio.create_task(cancel_event.wait())
+
+            done, pending = await asyncio.wait(
+                [get_task, watch_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if watch_task in done:
+                get_task.cancel()
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except asyncio.CancelledError:
+                    pass
+                raise _AgentStopped
+
+            watch_task.cancel()
+            msg_type, data = get_task.result()
+
+            if msg_type == "done":
+                return
+            elif msg_type == "cancelled":
+                raise _AgentStopped
+            elif msg_type == "error":
+                yield {"_error": data}
+                return
+
+            yield data
+
+    finally:
+        if not agent_task.done():
+            agent_task.cancel()
+            try:
+                await agent_task
+            except asyncio.CancelledError:
+                pass
+
+
 async def stream_agent(conversation_id: str, query: str, file_id: str = "", agent_type: str = "chat"):
+    # 获取分布式锁
+    lock_ok = await acquire_lock(conversation_id, ttl=settings.task_lock_timeout_seconds)
+    if not lock_ok:
+        yield {"event": "message",
+               "data": json.dumps({"type": "error", "content": "当前会话有任务正在执行中，请稍后再试"}, ensure_ascii=False)}
+        yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
+        yield {"event": "message", "data": "[DONE]"}
+        return
+
+    # 本地并发兜底
+    if conversation_id in _running_tasks:
+        await release_lock(conversation_id)
+        yield {"event": "message",
+               "data": json.dumps({"type": "error", "content": "当前会话有任务正在执行中，请稍后再试"}, ensure_ascii=False)}
+        yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
+        yield {"event": "message", "data": "[DONE]"}
+        return
+
     cancel_event = asyncio.Event()
     _running_tasks[conversation_id] = cancel_event
     redis_listener_task = asyncio.create_task(listen_stop(conversation_id, cancel_event))
@@ -41,6 +126,26 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
     agent = builder()
     history = store.load_history(conversation_id, limit=settings.max_history_rounds)
     history_msgs = _build_history_messages(history)
+
+    # Layer 1 压缩（旧搜索工具结果 + 长回答截断）
+    if settings.compression_enabled:
+        history_msgs = compress_layer_1(history_msgs)
+
+    # Token 估算 + Layer 2 LLM 摘要
+    pre_messages = history_msgs + [("user", query)]
+    token_count = estimate_messages_tokens(pre_messages)
+    threshold = int(settings.max_context_tokens * settings.compression_layer_2_threshold_ratio)
+    if token_count > threshold:
+        logger.info(f"Token 超阈值 ({token_count}/{settings.max_context_tokens})，触发 Layer 2 压缩（后台）")
+
+        async def _bg_compress():
+            try:
+                llm = build_llm()
+                await compress_layer_2(pre_messages, llm, settings.max_context_tokens)
+            except Exception as e:
+                logger.warning(f"Layer 2 压缩失败: {e}")
+
+        asyncio.create_task(_bg_compress())
 
     file_context = ""
     if file_id:
@@ -64,14 +169,12 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
     t0 = time.time()
     first_token_sent = False
     first_response_ms = 0
+    input_tokens = estimate_messages_tokens(inputs["messages"])
 
     try:
-        async for chunk in agent.astream_events(inputs, version="v2"):
-            if cancel_event.is_set():
-                yield {"event": "message",
-                       "data": json.dumps({"type": "error", "content": "用户已停止"}, ensure_ascii=False)}
-                yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
-                yield {"event": "message", "data": "[DONE]"}
+        async for chunk in _process_chunks(agent, inputs, cancel_event):
+            if isinstance(chunk, dict) and chunk.get("_error"):
+                yield {"event": "message", "data": json.dumps({"type": "error", "content": chunk["_error"]}, ensure_ascii=False)}
                 return
 
             kind = chunk["event"]
@@ -168,6 +271,12 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
                                 recommend_json = m.group(1).strip()
                             recommend_buffer = ""
 
+    except _AgentStopped:
+        yield {"event": "message",
+               "data": json.dumps({"type": "error", "content": "用户已停止"}, ensure_ascii=False)}
+        yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
+        yield {"event": "message", "data": "[DONE]"}
+        return
     except asyncio.CancelledError:
         yield {"event": "message", "data": json.dumps({"type": "error", "content": "任务已取消"}, ensure_ascii=False)}
     except Exception as e:
@@ -179,6 +288,7 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
         except asyncio.CancelledError:
             pass
         _running_tasks.pop(conversation_id, None)
+        await release_lock(conversation_id)
 
     if recommend_buffer:
         m = RECOMMEND_PATTERN.search(recommend_buffer)
@@ -204,6 +314,7 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
     if not recommend_json:
         recommend_json = "[]"
 
+    output_tokens = estimate_messages_tokens([("assistant", final_text)])
     store.save_message(
         session_id=conversation_id,
         question=query,
@@ -215,6 +326,9 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
         agent_type=agent_type,
         fileid=file_id,
     )
+
+    # F-24: Token 用量统计
+    logger.info(f"Token 用量: 输入~{input_tokens}, 输出~{output_tokens}, 会话={conversation_id}")
 
     yield {"event": "message", "data": json.dumps({"type": "recommend", "content": recommend_json}, ensure_ascii=False)}
     yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}

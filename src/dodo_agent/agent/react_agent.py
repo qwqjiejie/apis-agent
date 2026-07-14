@@ -1,6 +1,7 @@
 import logging
 
 from langchain.agents import create_agent
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI
 from src.dodo_agent.config.settings import settings
 from src.dodo_agent.tool.tavily_search import tavily_search
@@ -36,8 +37,30 @@ SKILLS_SYSTEM_PROMPT = """你是一个通用技能助手，名字叫小豆豆，
 4. 输出使用中文，代码和命令保持原样"""
 
 
-def _build_llm():
-    return ChatOpenAI(
+class ChatOpenAIWithReasoning(ChatOpenAI):
+    """保留 reasoning_content，用于 DeepSeek 等推理模型。"""
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> ChatGenerationChunk | None:
+        generation_chunk = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if generation_chunk is not None:
+            choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                reasoning = delta.get("reasoning_content", "")
+                if reasoning and hasattr(generation_chunk, "message"):
+                    generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning
+        return generation_chunk
+
+
+def build_llm():
+    return ChatOpenAIWithReasoning(
         model=settings.llm_model,
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
@@ -52,7 +75,7 @@ _skills_agent = None
 def build_react_agent():
     global _chat_agent
     if _chat_agent is None:
-        _chat_agent = create_agent(_build_llm(), [tavily_search], system_prompt=CHAT_SYSTEM_PROMPT)
+        _chat_agent = create_agent(build_llm(), [tavily_search], system_prompt=CHAT_SYSTEM_PROMPT)
         logger.info("Chat Agent 已缓存")
     return _chat_agent
 
@@ -74,6 +97,6 @@ def build_skills_agent():
         if skill_tools:
             logger.info(f"已加载 {len(skill_tools)} 个技能")
         tools.extend(skill_tools)
-        _skills_agent = create_agent(_build_llm(), tools, system_prompt=SKILLS_SYSTEM_PROMPT)
+        _skills_agent = create_agent(build_llm(), tools, system_prompt=SKILLS_SYSTEM_PROMPT)
         logger.info("Skills Agent 已缓存")
     return _skills_agent

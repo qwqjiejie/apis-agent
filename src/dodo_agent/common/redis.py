@@ -9,6 +9,7 @@ _redis_client: aioredis.Redis | None = None
 _redis_available: bool | None = None
 
 CHANNEL_PREFIX = "agent:stop"
+LOCK_PREFIX = "agent:lock"
 
 
 async def get_redis() -> aioredis.Redis | None:
@@ -71,3 +72,24 @@ async def listen_stop(conversation_id: str, cancel_event: asyncio.Event) -> None
             await pubsub.unsubscribe(channel)
         except Exception:
             pass
+
+
+async def acquire_lock(conversation_id: str, ttl: int = 300) -> bool:
+    r = await get_redis()
+    if r is None:
+        return True
+    try:
+        return await r.set(f"{LOCK_PREFIX}:{conversation_id}", "1", nx=True, ex=ttl)
+    except Exception as e:
+        logger.warning(f"Redis 获取锁失败，降级放行: {e}")
+        return True
+
+
+async def release_lock(conversation_id: str) -> None:
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await r.delete(f"{LOCK_PREFIX}:{conversation_id}")
+    except Exception:
+        pass

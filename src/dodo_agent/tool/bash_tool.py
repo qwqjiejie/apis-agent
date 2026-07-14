@@ -1,7 +1,6 @@
+import asyncio
 import logging
 import os
-import subprocess
-import time
 
 from langchain_core.tools import tool
 
@@ -13,7 +12,7 @@ WORK_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "
 
 
 @tool
-def bash_tool(command: str) -> str:
+async def bash_tool(command: str) -> str:
     """执行 Shell 命令，返回 stdout + stderr。
 
     适用场景：运行脚本、安装依赖、执行系统命令、查看进程状态等。
@@ -21,23 +20,33 @@ def bash_tool(command: str) -> str:
     工作目录为项目根目录。
     """
     logger.info(f"[bash] {command[:200]}")
+    proc = None
     try:
-        proc = subprocess.run(
+        proc = await asyncio.create_subprocess_exec(
             command,
             shell=True,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             cwd=WORK_DIR,
             env={**os.environ, "PATH": os.environ.get("PATH", "")},
         )
-        output = proc.stdout
-        if proc.stderr:
-            output += "\n[stderr]\n" + proc.stderr
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT)
+        output = stdout.decode("utf-8", errors="replace") if stdout else ""
+        if stderr:
+            output += "\n[stderr]\n" + stderr.decode("utf-8", errors="replace")
         if proc.returncode != 0:
             output += f"\n[exit code: {proc.returncode}]"
         return output[-MAX_OUTPUT:]
-    except subprocess.TimeoutExpired:
+    except asyncio.TimeoutError:
         return f"命令超时（{TIMEOUT}s）: {command[:100]}"
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         return f"执行失败: {e}"
+    finally:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
