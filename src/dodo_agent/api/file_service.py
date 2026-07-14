@@ -9,13 +9,13 @@ from fastapi import UploadFile
 from minio import Minio
 from minio.error import S3Error
 
-from src.api.embedding_service import embed_texts, embedding_available
-from src.config.settings import settings
-from src.storage.db import new_session
-from src.storage.models.ai_file_info import AiFileInfo, FileInfoRepo
-from src.storage.vector_store import vector_store
-from src.tool.file_parser import parse_file, get_file_type, is_supported
-from src.tool.text_splitter import split_text
+from src.dodo_agent.api.embedding_service import embed_texts, embedding_available
+from src.dodo_agent.config.settings import settings
+from src.dodo_agent.storage.db import new_session
+from src.dodo_agent.storage.models.ai_file_info import AiFileInfo, FileInfoRepo
+from src.dodo_agent.storage.vector_store import vector_store
+from src.dodo_agent.tool.file_parser import parse_file, get_file_type, is_supported
+from src.dodo_agent.tool.text_splitter import split_text
 
 logger = logging.getLogger("dodo")
 

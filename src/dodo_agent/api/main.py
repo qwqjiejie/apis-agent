@@ -5,10 +5,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes.agent import router as agent_router
-from src.api.routes.session import router as session_router
-from src.api.routes.file import router as file_router
-from src.common.logger import logger
+from src.dodo_agent.api.routes.agent import router as agent_router
+from src.dodo_agent.api.routes.session import router as session_router
+from src.dodo_agent.api.routes.file import router as file_router
+from src.dodo_agent.common.logger import logger
 
 app = FastAPI(title="Dodo Agent Python")
 
@@ -33,7 +33,7 @@ app.include_router(agent_router)
 app.include_router(session_router)
 app.include_router(file_router)
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 
 if os.path.isdir(STATIC_DIR):
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

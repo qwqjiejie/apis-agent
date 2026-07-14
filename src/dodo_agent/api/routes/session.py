@@ -4,8 +4,8 @@ import uuid
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
-from src.api.session import store
-from src.common.response import ok, ok_paged
+from src.dodo_agent.api.session import store
+from src.dodo_agent.common.response import ok, ok_paged
 
 router = APIRouter(prefix="/session", tags=["session"])
 

@@ -1,6 +1,6 @@
 from langchain.tools import tool
 from tavily import TavilyClient
-from src.config.settings import settings
+from src.dodo_agent.config.settings import settings
 
 
 @tool

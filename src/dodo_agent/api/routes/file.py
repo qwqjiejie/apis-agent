@@ -1,8 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, Query, Form
 from fastapi.responses import JSONResponse
 
-from src.api.file_service import file_service
-from src.common.response import ok
+from src.dodo_agent.api.file_service import file_service
+from src.dodo_agent.common.response import ok
 
 router = APIRouter(prefix="/file", tags=["file"])
 

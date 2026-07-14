@@ -7,7 +7,7 @@ from langchain_core.tools import StructuredTool
 
 logger = logging.getLogger("dodo")
 
-SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "skills"))
+SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
 
 
 def _parse_skill(filepath: str) -> dict | None:

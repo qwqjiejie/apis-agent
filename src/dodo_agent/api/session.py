@@ -1,9 +1,9 @@
 import time
 from datetime import datetime
 
-from src.storage import BaseStore
-from src.storage.db import new_session
-from src.storage.models.ai_session import AiSession, AiSessionRepo
+from src.dodo_agent.storage import BaseStore
+from src.dodo_agent.storage.db import new_session
+from src.dodo_agent.storage.models.ai_session import AiSession, AiSessionRepo
 
 
 class Store(BaseStore):

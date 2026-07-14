@@ -1,6 +1,6 @@
 import logging
 import uvicorn
-from src.config.settings import settings
+from src.dodo_agent.config.settings import settings
 
 logging.basicConfig(
     level=settings.log_level.upper(),
@@ -11,7 +11,7 @@ logging.basicConfig(
 
 def main():
     uvicorn.run(
-        "src.api.main:app",
+        "src.dodo_agent.api.main:app",
         host=settings.server_host,
         port=settings.server_port,
         log_level=settings.log_level.lower(),

@@ -9,7 +9,7 @@ logger = logging.getLogger("dodo")
 
 TIMEOUT = 30
 MAX_OUTPUT = 10000
-WORK_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WORK_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 
 @tool

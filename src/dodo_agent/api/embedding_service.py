@@ -3,7 +3,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from src.config.settings import settings
+from src.dodo_agent.config.settings import settings
 
 logger = logging.getLogger("dodo")
 

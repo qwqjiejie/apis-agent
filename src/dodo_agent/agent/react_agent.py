@@ -2,12 +2,12 @@ import logging
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from src.config.settings import settings
-from src.tool.tavily_search import tavily_search
-from src.tool.bash_tool import bash_tool
-from src.tool.file_system_tools import read_file, write_file, edit_file, list_files, glob_files
-from src.tool.grep_tool import grep_tool
-from src.tool.skills_tool import load_skills
+from src.dodo_agent.config.settings import settings
+from src.dodo_agent.tool.tavily_search import tavily_search
+from src.dodo_agent.tool.bash_tool import bash_tool
+from src.dodo_agent.tool.file_system_tools import read_file, write_file, edit_file, list_files, glob_files
+from src.dodo_agent.tool.grep_tool import grep_tool
+from src.dodo_agent.tool.skills_tool import load_skills
 
 logger = logging.getLogger("dodo")
 

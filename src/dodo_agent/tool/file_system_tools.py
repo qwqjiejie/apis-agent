@@ -6,7 +6,7 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger("dodo")
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 
 def _safe_path(path: str) -> str:

@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from src.config.settings import settings
+from src.dodo_agent.config.settings import settings
 
 _engine = None
 _SessionLocal: sessionmaker | None = None

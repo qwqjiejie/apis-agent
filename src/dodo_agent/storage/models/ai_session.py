@@ -2,7 +2,7 @@ from datetime import datetime
 from sqlalchemy import BigInteger, String, Text, DateTime, Index, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from src.storage.base import BaseRepository
+from src.dodo_agent.storage.base import BaseRepository
 
 
 class Base(DeclarativeBase):

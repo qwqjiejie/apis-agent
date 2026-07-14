@@ -2,8 +2,8 @@ from datetime import datetime
 from sqlalchemy import BigInteger, String, Text, DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
-from src.storage.models.ai_session import Base
-from src.storage.base import BaseRepository
+from src.dodo_agent.storage.models.ai_session import Base
+from src.dodo_agent.storage.base import BaseRepository
 
 
 class AiFileInfo(Base):

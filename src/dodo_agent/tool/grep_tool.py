@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger("dodo")
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 
 def _try_rg(pattern: str, path: str) -> str | None:

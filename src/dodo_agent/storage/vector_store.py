@@ -2,8 +2,8 @@ import logging
 
 from pymilvus import MilvusClient, DataType
 
-from src.config.settings import settings
-from src.api.embedding_service import embedding_dim, embedding_available
+from src.dodo_agent.config.settings import settings
+from src.dodo_agent.api.embedding_service import embedding_dim
 
 logger = logging.getLogger("dodo")
 
@@ -14,16 +14,6 @@ FIELD_FILE_ID = "file_id"
 FIELD_CHUNK_IDX = "chunk_idx"
 FIELD_TEXT = "text"
 FIELD_VECTOR = "vector"
-
-SCHEMA = {
-    "fields": [
-        {"name": FIELD_ID, "dtype": DataType.VARCHAR, "is_primary": True, "max_length": 64},
-        {"name": FIELD_FILE_ID, "dtype": DataType.VARCHAR, "max_length": 255},
-        {"name": FIELD_CHUNK_IDX, "dtype": DataType.INT64},
-        {"name": FIELD_TEXT, "dtype": DataType.VARCHAR, "max_length": 2000},
-        {"name": FIELD_VECTOR, "dtype": DataType.FLOAT_VECTOR, "dim": embedding_dim()},
-    ],
-}
 
 
 class VectorStore:

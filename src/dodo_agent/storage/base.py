@@ -1,7 +1,7 @@
 from typing import TypeVar, Generic
 from sqlalchemy import func, select, delete
 from sqlalchemy.orm import Session
-from src.storage.db import new_session
+from src.dodo_agent.storage.db import new_session
 
 M = TypeVar("M")
 
