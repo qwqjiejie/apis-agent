@@ -12,6 +12,7 @@ from src.dodo_agent.api.file_service import file_service
 from src.dodo_agent.api.rag_service import build_context
 from src.dodo_agent.api.session import store
 from src.dodo_agent.common.logger import logger
+from src.dodo_agent.common.redis import listen_stop, publish_stop
 from src.dodo_agent.config.settings import settings
 
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
@@ -34,6 +35,7 @@ def _build_history_messages(history: list[dict]) -> list:
 async def stream_agent(conversation_id: str, query: str, file_id: str = "", agent_type: str = "chat"):
     cancel_event = asyncio.Event()
     _running_tasks[conversation_id] = cancel_event
+    redis_listener_task = asyncio.create_task(listen_stop(conversation_id, cancel_event))
 
     builder = build_skills_agent if agent_type == "skills" else build_react_agent
     agent = builder()
@@ -171,6 +173,11 @@ async def stream_agent(conversation_id: str, query: str, file_id: str = "", agen
     except Exception as e:
         yield {"event": "message", "data": json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False)}
     finally:
+        redis_listener_task.cancel()
+        try:
+            await redis_listener_task
+        except asyncio.CancelledError:
+            pass
         _running_tasks.pop(conversation_id, None)
 
     if recommend_buffer:
@@ -280,5 +287,7 @@ async def agent_stop(conversationId: str = Query(...)):
     event = _running_tasks.get(conversationId)
     if event:
         event.set()
+    await publish_stop(conversationId)
+    if event:
         return JSONResponse({"code": 200, "data": None, "message": "已发送停止信号"})
     return JSONResponse({"code": 200, "data": None, "message": "无运行中的任务"})

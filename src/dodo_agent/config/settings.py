@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     milvus_user: str = ""
     milvus_pass: str = ""
     milvus_db: str = "default"
+    redis_host: str = "127.0.0.1"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: str = ""
     embedding_model: str = "text-embedding-v4"
     embedding_dim: int = 1024
 
