@@ -18,7 +18,7 @@ def new_session() -> Session | None:
     global _SessionLocal
     try:
         if _SessionLocal is None:
-            _SessionLocal = sessionmaker(bind=get_engine())
+            _SessionLocal = sessionmaker(bind=get_engine(), expire_on_commit=False)
         return _SessionLocal()
     except Exception:
         return None

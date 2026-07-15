@@ -1,11 +1,12 @@
 import asyncio
 import json
+import os
 import re
 import time
 
 from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse, FileResponse
 from sse_starlette.sse import EventSourceResponse
-from fastapi.responses import JSONResponse
 
 from src.dodo_agent.agent.react_agent import build_llm, build_react_agent, build_skills_agent
 from src.dodo_agent.api.file_service import file_service
@@ -362,14 +363,135 @@ async def agent_file_stream(
 
 
 @router.get("/pptx/stream")
-async def agent_pptx_stream(query: str = Query(...), conversationId: str = Query(...)):
+async def agent_pptx_stream(
+        query: str = Query(...),
+        conversationId: str = Query(...),
+):
     async def event_generator():
-        yield {"event": "message",
-               "data": json.dumps({"type": "error", "content": "PPT生成功能尚未实现"}, ensure_ascii=False)}
+        lock_ok = await acquire_lock(conversationId, ttl=settings.task_lock_timeout_seconds)
+        if not lock_ok:
+            yield {"event": "message",
+                   "data": json.dumps({"type": "error", "content": "当前会话有任务正在执行中，请稍后再试"}, ensure_ascii=False)}
+            yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
+            yield {"event": "message", "data": "[DONE]"}
+            return
+
+        if conversationId in _running_tasks:
+            await release_lock(conversationId)
+            yield {"event": "message",
+                   "data": json.dumps({"type": "error", "content": "当前会话有任务正在执行中，请稍后再试"}, ensure_ascii=False)}
+            yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
+            yield {"event": "message", "data": "[DONE]"}
+            return
+
+        cancel_event = asyncio.Event()
+        _running_tasks[conversationId] = cancel_event
+        redis_listener_task = asyncio.create_task(listen_stop(conversationId, cancel_event))
+
+        from src.dodo_agent.agent.ppt_builder import ppt_builder_stream, _AgentStopped as PPTStopped
+
+        t0 = time.time()
+        ppt_title = ""
+        ppt_url = ""
+
+        try:
+            async for payload in ppt_builder_stream(conversationId, query, cancel_event):
+                yield payload
+                if isinstance(payload, dict) and payload.get("event") == "message":
+                    try:
+                        data = json.loads(payload["data"])
+                        if data.get("type") == "file_ready":
+                            ppt_url = data.get("url", "")
+                            ppt_title = data.get("fileName", "")
+                    except json.JSONDecodeError:
+                        pass
+
+        except PPTStopped:
+            yield {"event": "message",
+                   "data": json.dumps({"type": "error", "content": "用户已停止"}, ensure_ascii=False)}
+            yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
+            yield {"event": "message", "data": "[DONE]"}
+            return
+        except asyncio.CancelledError:
+            yield {"event": "message",
+                   "data": json.dumps({"type": "error", "content": "任务已取消"}, ensure_ascii=False)}
+        except Exception as e:
+            yield {"event": "message",
+                   "data": json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False)}
+        finally:
+            redis_listener_task.cancel()
+            try:
+                await redis_listener_task
+            except asyncio.CancelledError:
+                pass
+            _running_tasks.pop(conversationId, None)
+            await release_lock(conversationId)
+
+        total_ms = int((time.time() - t0))
+        answer_text = (
+            f"PPT已生成: [{ppt_title}]({ppt_url})" if ppt_url
+            else f"PPT生成完成: {ppt_title}"
+        )
+        store.save_message(
+            session_id=conversationId,
+            question=query,
+            answer=answer_text,
+            thinking="",
+            reference="[]",
+            recommend="[]",
+            tools="pptx_builder",
+            agent_type="pptx",
+        )
+        logger.info(f"PPT Builder 完成, 耗时={total_ms}s, conv={conversationId}")
+
         yield {"event": "message", "data": json.dumps({"type": "complete"}, ensure_ascii=False)}
         yield {"event": "message", "data": "[DONE]"}
 
     return EventSourceResponse(event_generator())
+
+
+@router.get("/pptx/download")
+async def agent_pptx_download(conversationId: str = Query(...)):
+    from src.dodo_agent.storage.models.ai_ppt_inst import PptInstRepo
+    from minio import Minio
+    from minio.error import S3Error
+
+    repo = PptInstRepo()
+    inst = repo.find_by_conversation_id(conversationId)
+    if not inst or not inst.file_url:
+        return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "PPT文件不存在"})
+
+    file_url = inst.file_url
+
+    if file_url.startswith("local://"):
+        local_path = file_url[len("local://"):]
+        if not os.path.exists(local_path):
+            return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "文件已被清理"})
+        return FileResponse(local_path, filename=os.path.basename(local_path),
+                            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+
+    if file_url.startswith("minio://"):
+        bucket_obj = file_url[len("minio://"):]
+        bucket, obj_name = bucket_obj.split("/", 1)
+        try:
+            client = Minio(
+                settings.minio_endpoint,
+                access_key=settings.minio_access_key,
+                secret_key=settings.minio_secret_key,
+                secure=False,
+            )
+            from fastapi.responses import StreamingResponse
+            from io import BytesIO
+            data = client.get_object(bucket, obj_name)
+            return StreamingResponse(
+                BytesIO(data.read()),
+                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                headers={"Content-Disposition": f"attachment; filename={obj_name.rsplit('/', 1)[-1]}"},
+            )
+        except S3Error:
+            return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "文件下载失败"})
+
+    return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "无效的文件路径"})
 
 
 @router.get("/deep/stream")

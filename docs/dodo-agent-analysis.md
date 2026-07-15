@@ -13,7 +13,7 @@
 |------|------|------|------|
 | F-01 | 智能问答 (WebSearch) | 已完成 | 基于 ReAct 模式的联网搜索 + 推理，实时获取互联网信息后回答用户问题；调用 Tavily MCP 搜索引擎 |
 | F-02 | 文件问答 (File RAG) | 已完成 | 上传 PDF/DOC/DOCX/TXT/图片文件后进行语义问答；支持全文直读和 Milvus 向量检索两种模式 |
-| F-03 | PPT 生成 (PPT Builder) | 未实现 | 基于模板驱动的 PPT 自动生成，含意图识别(CREATE/MODIFY/RESUME)、Schema 生成、大纲生成、内容填充、AI 配图、多格式渲染(Python-pptx / PptxGenJS) |
+| F-03 | PPT 生成 (PPT Builder) | 已完成 | 状态机驱动的 PPT 自动生成：INIT(意图识别) -> SCHEMA(结构规划) -> OUTLINE(大纲生成) -> CONTENT(内容填充+Tavily搜图) -> RENDER(python-pptx渲染)，支持断点续传和 SSE 流式进度推送 |
 | F-04 | 深度研究 (Deep Research) | 已完成 | Plan-Execute-Critique 多轮自主研究：需求澄清 -> 研究主题生成 -> 多轮执行 (并行子任务 + 依赖传递) -> 批判评估 -> 综合报告。前端实时展示各阶段进展、子任务搜索过程和研究报告流式输出 |
 | F-05 | 技能助手 (Skills) | 已完成 | 通用型 ReAct Agent，集成搜索/文件/Skills/文件系统/Bash/Grep 等所有工具，LLM 自动判断使用哪个工具 |
 
@@ -164,15 +164,15 @@ Phase 1: 需求澄清 → Phase 2: 研究主题生成 → Phase 3: 循环执行 
 #### 2.2.4 状态机模式 (PPT Builder)
 
 ```
-INIT(意图识别) → SCHEMA(结构生成) → OUTLINE(大纲生成) → SEARCH(搜索配图)
-    → CONTENT(内容填充) → IMAGE(AI配图) → RENDER(渲染) → SUCCESS(完成)
+INIT(意图识别) -> SCHEMA(结构规划) -> OUTLINE(大纲生成) -> CONTENT(内容填充+Tavily搜图)
+    -> RENDER(python-pptx渲染) -> SUCCESS(完成)
 ```
 
 关键技术点：
-- **策略模式**: 每个状态对应一个 PptStateStrategy 实现
-- **断点重连**: 状态持久化到 MySQL (ai_ppt_inst 表)，中断后可从任意状态恢复
-- **意图识别**: CREATE_PPT / MODIFY_PPT / RESUME_PPT 三意图路由
-- **双渲染引擎**: Python-pptx + PptxGenJS
+- **状态持久化**: 每个状态完成后写入 MySQL (ai_ppt_inst 表)，中断后可从任意状态恢复
+- **python-pptx 渲染**: LLM 决定布局，python-pptx 原生渲染，支持 COVER/CATALOG/CONTENT/COMPARE/END 五种页面类型
+- **Tavily 搜图**: 通过 Tavily API `include_images` 搜索配图，下载后嵌入对应幻灯片
+- **SSE 流式进度**: 实时推送状态变更和逐页生成进度（thinking 事件），前端实时展示
 
 ### 2.3 项目文件结构
 
@@ -244,6 +244,53 @@ src/main/java/cn/hollis/llm/mentor/agent/
 └── mapper/                            # MyBatis 数据访问层
 ```
 
+#### Python 版文件结构
+
+```
+src/dodo_agent/
+├── main.py                              # 入口
+├── api/                                 # API 层
+│   ├── main.py                          # FastAPI 应用
+│   ├── routes/
+│   │   ├── agent.py                     # Agent SSE 路由 (chat/file/pptx/deep/skills/stop)
+│   │   ├── file.py                      # 文件管理路由
+│   │   └── session.py                   # 会话管理路由
+│   ├── file_service.py                  # 文件服务 (上传/解析/MinIO)
+│   ├── rag_service.py                   # RAG 检索服务
+│   ├── embedding_service.py             # 向量嵌入服务
+│   └── session.py                       # 会话存储 (MySQL + 内存降级)
+├── agent/                               # Agent 层
+│   ├── react_agent.py                   # ReAct Agent (WebSearch + Skills)
+│   ├── deep_research.py                 # 深度研究 Agent (Plan-Execute-Critique)
+│   └── ppt_builder.py                   # PPT Builder Agent (状态机 + python-pptx)
+├── storage/                             # 存储层
+│   ├── db.py                            # 数据库连接
+│   ├── base.py                          # 通用 Repository
+│   ├── vector_store.py                  # Milvus 向量存储
+│   └── models/
+│       ├── ai_session.py                # 会话模型
+│       ├── ai_file_info.py              # 文件信息模型
+│       └── ai_ppt_inst.py               # PPT 实例模型
+├── tool/                                # 工具层
+│   ├── tavily_search.py                 # Tavily 搜索
+│   ├── bash_tool.py                     # Shell 命令
+│   ├── file_system_tools.py             # 文件系统工具
+│   ├── grep_tool.py                     # 代码搜索
+│   ├── file_parser.py                   # 文件解析 (PDF/Word)
+│   ├── text_splitter.py                 # 文本切分
+│   ├── image_recognition.py             # 图片识别
+│   └── skills_tool.py                   # Skills 加载
+├── context/                             # 上下文管理
+│   ├── compressor.py                    # 双层压缩
+│   └── token_counter.py                 # Token 估算
+├── config/
+│   └── settings.py                      # 全局配置 (Pydantic Settings)
+└── common/
+    ├── logger.py                        # 日志
+    ├── redis.py                         # Redis 工具 (锁/Pub/Sub)
+    └── response.py                      # 统一响应格式
+```
+
 ### 2.4 API 接口汇总
 
 | 方法 | 路径 | 描述 |
@@ -251,6 +298,7 @@ src/main/java/cn/hollis/llm/mentor/agent/
 | GET | `/agent/chat/stream` | 智能问答 (SSE流式) |
 | GET | `/agent/file/stream` | 文件问答 (SSE流式) |
 | GET | `/agent/pptx/stream` | PPT 生成 (SSE流式) |
+| GET | `/agent/pptx/download` | 下载生成的 PPT 文件 |
 | GET | `/agent/deep/stream` | 深度研究 (SSE流式) |
 | GET | `/agent/skills/stream` | 技能助手 (SSE流式) |
 | GET | `/agent/stop` | 停止 Agent 执行 |
@@ -274,8 +322,17 @@ src/main/java/cn/hollis/llm/mentor/agent/
 {"type":"error","content":"错误信息"}
 ```
 
+PPT Builder 额外事件类型：
+```json
+{"type":"thinking","content":"[3/10] 生成中：市场分析\n\n"}
+{"type":"thinking","content":"[3/10] 已完成：市场分析\n\n"}
+{"type":"text","content":"\n\nPPT已生成：[点击下载 xxx.pptx](/agent/pptx/download?conversationId=...)"}
+```
+
+
 ### 2.6 技术栈
 
+#### 原 Java 版
 | 层级 | 技术 | 版本 |
 |------|------|------|
 | 基础框架 | Spring Boot + Spring AI | 3.2.x |
@@ -292,6 +349,22 @@ src/main/java/cn/hollis/llm/mentor/agent/
 | 浏览器引擎 | Playwright | 1.45.0 |
 | JSON | FastJSON2 | 2.0.43 |
 
+#### Python 版
+| 层级 | 技术 | 版本 |
+|------|------|------|
+| 基础框架 | FastAPI + Uvicorn | >=0.115 |
+| Agent 框架 | LangChain + LangGraph | >=0.3 |
+| 流式响应 | sse-starlette | >=2.1 |
+| 大模型 | OpenAI API (兼容协议) | - |
+| 向量数据库 | Milvus | >=2.4 |
+| 关系数据库 | MySQL + SQLAlchemy | 8.0 / >=2.0 |
+| 对象存储 | MinIO | >=7.2 |
+| 缓存/分布式锁 | Redis | >=5.0 |
+| 搜索 | Tavily API | >=0.5 |
+| 文件解析 | pdfplumber + python-docx | >=0.11 / >=1.1 |
+| PPT 渲染 | python-pptx | >=1.0 |
+| Token 估算 | tiktoken (o200k_base) | >=0.7 |
+
 ### 2.7 关键设计特点
 
 1. **多 Agent 架构**: 5 种 Agent 模式覆盖不同场景（ReAct / RAG+ReAct / StateMachine / Plan-Execute / General ReAct）
@@ -299,9 +372,10 @@ src/main/java/cn/hollis/llm/mentor/agent/
 3. **统一协议**: 所有 Agent 共享 SSE 流式响应格式和 BaseAgent 基类
 4. **分布式就绪**: Redis 分布式锁实现跨实例任务互斥和 Pub/Sub 停止广播
 5. **上下文管理**: 双层压缩策略（Layer 1 占位符截断 + Layer 2 LLM 摘要），Layer 2 后台异步执行不阻塞首 token。
-6. **断点续传**: PPT 状态机支持任意状态中断后恢复
-7. **并发控制**: Semaphore 控制深度研究的工具调用并发度
-8. **插件化工具**: MCP 协议实现工具热插拔，Skills 体系支持动态加载
+6. **断点续传**: PPT 状态机每步写入 MySQL，中断后从上次状态恢复
+7. **python-pptx 渲染**: LLM 决定布局，python-pptx 渲染 5 种页面类型，Tavily 搜索配图嵌入
+8. **并发控制**: Semaphore 控制深度研究的工具调用并发度
+9. **插件化工具**: MCP 协议实现工具热插拔，Skills 体系支持动态加载
 
 ---
 
@@ -331,13 +405,13 @@ H5 前端页面已复制到 `src/main/resources/static/` 目录下：
 
 | 分类 | 已完成 | 部分实现 | 未实现 | 合计 |
 |------|--------|----------|--------|------|
-| 核心对话功能 | 4 (F-01~02, F-04~05) | 0 | 1 (F-03) | 5 |
+| 核心对话功能 | 5 (F-01~05) | 0 | 0 | 5 |
 | 会话管理功能 | 3 (F-06~08) | 0 | 0 | 3 |
 | 文件管理功能 | 5 (F-09~13) | 0 | 0 | 5 |
 | Agent 控制功能 | 3 (F-14~16) | 0 | 0 | 3 |
 | 流式输出功能 | 5 (F-17~21) | 0 | 0 | 5 |
 | 上下文管理功能 | 3 (F-22~24) | 0 | 0 | 3 |
 | 工具集功能 | 5 (F-25~29) | 0 | 0 | 5 |
-| **合计** | **28** | **0** | **1** | **29** |
+| **合计** | **29** | **0** | **0** | **29** |
 
-**进度: 28/29 已完成 (97%)**
+**进度: 29/29 已完成 (100%)**

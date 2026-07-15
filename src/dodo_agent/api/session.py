@@ -109,6 +109,11 @@ class Store(BaseStore):
 
     def delete_session(self, session_id: str) -> bool:
         if self._db_ok:
+            from src.dodo_agent.storage.models.ai_ppt_inst import PptInstRepo
+            ppt_repo = PptInstRepo()
+            ppt_inst = ppt_repo.find_by_conversation_id(session_id)
+            if ppt_inst:
+                ppt_repo.delete(ppt_inst)
             return self._repo().delete_by_session_id(session_id) > 0
 
         before = len(self._fallback)
