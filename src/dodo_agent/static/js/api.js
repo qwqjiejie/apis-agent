@@ -6,11 +6,13 @@
 // 测试后端连接
 const testConnection = async (backendUrl) => {
     try {
-        const response = await fetch(`${backendUrl}/file/list`, {
-            method: 'GET',
+        const response = await fetch(`${backendUrl}/api/v1/file/list`, {
+            method: 'POST',
             headers: {
+                'Content-Type': 'application/json',
                 'Accept': 'application/json'
-            }
+            },
+            body: JSON.stringify({ pageNum: 1, pageSize: 1 })
         });
         return { success: true };
     } catch (error) {
@@ -24,11 +26,13 @@ const testConnection = async (backendUrl) => {
 // 加载会话列表
 const loadChats = async (backendUrl) => {
     try {
-        const response = await fetch(`${backendUrl}/session/list?pageNum=1&pageSize=100`, {
-            method: 'GET',
+        const response = await fetch(`${backendUrl}/api/v1/session/list`, {
+            method: 'POST',
             headers: {
+                'Content-Type': 'application/json',
                 'Accept': 'application/json'
-            }
+            },
+            body: JSON.stringify({ pageNum: 1, pageSize: 100 })
         });
 
         if (!response.ok) {
@@ -57,11 +61,13 @@ const loadChats = async (backendUrl) => {
 // 获取会话详情
 const getChatDetail = async (backendUrl, chatId) => {
     try {
-        const response = await fetch(`${backendUrl}/session/${chatId}`, {
-            method: 'GET',
+        const response = await fetch(`${backendUrl}/api/v1/session/detail`, {
+            method: 'POST',
             headers: {
+                'Content-Type': 'application/json',
                 'Accept': 'application/json'
-            }
+            },
+            body: JSON.stringify({ conversationId: chatId })
         });
 
         if (!response.ok) {
@@ -82,11 +88,13 @@ const getChatDetail = async (backendUrl, chatId) => {
 // 删除会话
 const deleteChat = async (backendUrl, chatId) => {
     try {
-        const response = await fetch(`${backendUrl}/session/${chatId}`, {
-            method: 'DELETE',
+        const response = await fetch(`${backendUrl}/api/v1/session/delete`, {
+            method: 'POST',
             headers: {
+                'Content-Type': 'application/json',
                 'Accept': 'application/json'
-            }
+            },
+            body: JSON.stringify({ conversationId: chatId })
         });
 
         if (!response.ok) {
@@ -112,7 +120,7 @@ const uploadFile = async (backendUrl, file) => {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(`${backendUrl}/file/upload`, {
+    const response = await fetch(`${backendUrl}/api/v1/file/upload`, {
         method: 'POST',
         body: formData
     });
@@ -143,23 +151,27 @@ const uploadFile = async (backendUrl, file) => {
 // 获取流式聊天 API URL
 const getStreamChatUrl = (backendUrl, selectedAgent, hasFile) => {
     if (hasFile) {
-        return `${backendUrl}/agent/file/stream`;
+        return `${backendUrl}/api/v1/agent/file/stream`;
     } else if (selectedAgent === 'ppt') {
-        return `${backendUrl}/agent/pptx/stream`;
+        return `${backendUrl}/api/v1/agent/pptx/stream`;
     } else if (selectedAgent === 'deep') {
-        return `${backendUrl}/agent/deep/stream`;
+        return `${backendUrl}/api/v1/agent/deep/stream`;
     } else if (selectedAgent === 'skills') {
-        return `${backendUrl}/agent/skills/stream`;
+        return `${backendUrl}/api/v1/agent/skills/stream`;
     }
-    return `${backendUrl}/agent/chat/stream`;
+    return `${backendUrl}/api/v1/agent/chat/stream`;
 };
 
 // 停止流式请求
 const stopStream = async (backendUrl, conversationId) => {
     try {
-        const stopUrl = `${backendUrl}/agent/stop?conversationId=${conversationId}`;
-        const response = await fetch(stopUrl, {
-            method: 'GET'
+        const response = await fetch(`${backendUrl}/api/v1/agent/stop`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({ conversationId: conversationId })
         });
         const result = await response.json();
         return result;

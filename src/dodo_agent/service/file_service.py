@@ -146,12 +146,12 @@ class FileService:
 
     # ---- list ----
 
-    def list_files(self) -> list[dict]:
+    def list_files(self, page: int = 1, size: int = 20) -> tuple[list[dict], int]:
         if not self._db_ok:
-            return []
+            return [], 0
         repo = FileInfoRepo()
-        rows = repo.find_all(order_by=AiFileInfo.created_at.desc())
-        return [
+        rows, total = repo.paginate(page, size, order_by=AiFileInfo.created_at.desc())
+        records = [
             {
                 "fileId": r.file_id, "fileName": r.file_name,
                 "fileType": r.file_type, "fileSize": r.file_size,
@@ -159,6 +159,7 @@ class FileService:
             }
             for r in rows
         ]
+        return records, total
 
     # ---- info ----
 

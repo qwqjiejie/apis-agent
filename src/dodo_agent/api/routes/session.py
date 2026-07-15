@@ -1,11 +1,25 @@
 import secrets
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
 from src.dodo_agent.service.session_service import store
 from src.dodo_agent.common.response import ok, ok_paged, error
 
 router = APIRouter(prefix="/session", tags=["session"])
+
+
+class SessionListRequest(BaseModel):
+    pageNum: int = Field(default=1, ge=1)
+    pageSize: int = Field(default=20, ge=1, le=100)
+
+
+class SessionDetailRequest(BaseModel):
+    conversationId: str = Field(..., min_length=1)
+
+
+class SessionDeleteRequest(BaseModel):
+    conversationId: str = Field(..., min_length=1)
 
 
 @router.post("")
@@ -15,23 +29,23 @@ async def create_session():
     return ok({"conversationId": cid, "question": "新对话"})
 
 
-@router.get("/list")
-async def list_sessions(pageNum: int = Query(default=1), pageSize: int = Query(default=100)):
-    records, total = store.list_sessions(page=pageNum, size=pageSize)
-    return ok_paged(records, total, pageNum, pageSize)
+@router.post("/list")
+async def list_sessions(req: SessionListRequest):
+    records, total = store.list_sessions(page=req.pageNum, size=req.pageSize)
+    return ok_paged(records, total, req.pageNum, req.pageSize)
 
 
-@router.get("/{conversation_id}")
-async def get_session(conversation_id: str):
-    session = store.get_session(conversation_id)
+@router.post("/detail")
+async def get_session(req: SessionDetailRequest):
+    session = store.get_session(req.conversationId)
     if not session:
         return error(404, "会话不存在")
     return ok(session)
 
 
-@router.delete("/{conversation_id}")
-async def delete_session(conversation_id: str):
-    ok_deleted = store.delete_session(conversation_id)
+@router.post("/delete")
+async def delete_session(req: SessionDeleteRequest):
+    ok_deleted = store.delete_session(req.conversationId)
     if not ok_deleted:
         return error(404, "会话不存在")
     return ok(None)

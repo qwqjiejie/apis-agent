@@ -1,18 +1,17 @@
 import json
 import os
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
-
-from fastapi import Body
 
 from src.dodo_agent.agent.base_agent import BaseAgent
 from src.dodo_agent.agent.chat_agent import ChatAgent
-from src.dodo_agent.common.exceptions import DodoAgentError, QueryTooLongError
+from src.dodo_agent.common.exceptions import QueryTooLongError, ValidationError
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.redis import publish_stop
-from src.dodo_agent.common.response import ok, error
+from src.dodo_agent.common.response import error, ok
 from src.dodo_agent.common.streaming import make_sse
 from src.dodo_agent.config.settings import get_settings
 from src.dodo_agent.tool.bash_tool import resolve_confirmation
@@ -20,68 +19,72 @@ from src.dodo_agent.tool.bash_tool import resolve_confirmation
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
+class StreamRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    conversationId: str = Field(..., min_length=1)
+    fileId: str = ""
+
+
+class StopRequest(BaseModel):
+    conversationId: str = Field(..., min_length=1)
+
+
+class ShellConfirmRequest(BaseModel):
+    confirmId: str = Field(..., min_length=1)
+    approved: bool
+
+
 def _check_query_length(query: str):
-    """在 SSE 生成器之前校验，异常由全局处理器返回非 200，前端弹窗展示。"""
     if len(query) > get_settings().max_query_length:
         raise QueryTooLongError(get_settings().max_query_length)
 
 
-@router.get("/chat/stream")
-async def agent_chat_stream(
-        query: str = Query(...),
-        conversationId: str = Query(...),
-        fileId: str = Query(default=""),
-):
-    _check_query_length(query)
+@router.post("/chat/stream")
+async def agent_chat_stream(req: StreamRequest):
+    _check_query_length(req.query)
 
     async def event_generator():
-        agent = ChatAgent(conversationId, query, fileId, agent_type="chat")
+        agent = ChatAgent(req.conversationId, req.query, req.fileId, agent_type="chat")
         async for payload in agent.run():
             yield payload
 
     return EventSourceResponse(event_generator())
 
 
-@router.get("/file/stream")
-async def agent_file_stream(
-        query: str = Query(...),
-        conversationId: str = Query(...),
-        fileId: str = Query(...),
-):
-    _check_query_length(query)
+@router.post("/file/stream")
+async def agent_file_stream(req: StreamRequest):
+    _check_query_length(req.query)
 
     async def event_generator():
-        agent = ChatAgent(conversationId, query, fileId, agent_type="chat")
+        agent = ChatAgent(req.conversationId, req.query, req.fileId, agent_type="chat")
         async for payload in agent.run():
             yield payload
 
     return EventSourceResponse(event_generator())
 
 
-@router.get("/pptx/stream")
-async def agent_pptx_stream(
-        query: str = Query(...),
-        conversationId: str = Query(...),
-):
-    _check_query_length(query)
+@router.post("/pptx/stream")
+async def agent_pptx_stream(req: StreamRequest):
+    _check_query_length(req.query)
 
     async def event_generator():
         from src.dodo_agent.agent.ppt_builder_agent import PptBuilderAgent
-        agent = PptBuilderAgent(conversationId, query)
+        agent = PptBuilderAgent(req.conversationId, req.query)
         async for payload in agent.run():
             yield payload
 
     return EventSourceResponse(event_generator())
 
 
-@router.get("/pptx/download")
-async def agent_pptx_download(conversationId: str = Query(...)):
-    from src.dodo_agent.storage.models.ai_ppt_inst import PptInstRepo
+@router.post("/pptx/download")
+async def agent_pptx_download(req: StopRequest):
     from minio import Minio
     from minio.error import S3Error
 
+    from src.dodo_agent.storage.models.ai_ppt_inst import PptInstRepo
+
     repo = PptInstRepo()
-    inst = repo.find_by_conversation_id(conversationId)
+    inst = repo.find_by_conversation_id(req.conversationId)
     if not inst or not inst.file_url:
         return error(404, "PPT文件不存在")
 
@@ -104,8 +107,9 @@ async def agent_pptx_download(conversationId: str = Query(...)):
                 secret_key=get_settings().minio_secret_key,
                 secure=False,
             )
-            from fastapi.responses import StreamingResponse
             from io import BytesIO
+
+            from fastapi.responses import StreamingResponse
             data = client.get_object(bucket, obj_name)
             return StreamingResponse(
                 BytesIO(data.read()),
@@ -118,54 +122,46 @@ async def agent_pptx_download(conversationId: str = Query(...)):
     return error(404, "无效的文件路径")
 
 
-@router.get("/deep/stream")
-async def agent_deep_stream(
-        query: str = Query(...),
-        conversationId: str = Query(...),
-        fileId: str = Query(default=""),
-):
-    _check_query_length(query)
+@router.post("/deep/stream")
+async def agent_deep_stream(req: StreamRequest):
+    _check_query_length(req.query)
 
     from src.dodo_agent.agent.deep_research_agent import DeepResearchAgent
 
     async def event_generator():
-        agent = DeepResearchAgent(conversationId, query, fileId)
+        agent = DeepResearchAgent(req.conversationId, req.query, req.fileId)
         async for payload in agent.run():
             yield payload
 
     return EventSourceResponse(event_generator())
 
 
-@router.get("/skills/stream")
-async def agent_skills_stream(
-        query: str = Query(...),
-        conversationId: str = Query(...),
-        fileId: str = Query(default=""),
-):
-    _check_query_length(query)
+@router.post("/skills/stream")
+async def agent_skills_stream(req: StreamRequest):
+    _check_query_length(req.query)
 
     async def event_generator():
-        agent = ChatAgent(conversationId, query, fileId, agent_type="skills")
+        agent = ChatAgent(req.conversationId, req.query, req.fileId, agent_type="skills")
         async for payload in agent.run():
             yield payload
 
     return EventSourceResponse(event_generator())
 
 
-@router.get("/stop")
-async def agent_stop(conversationId: str = Query(...)):
-    event = BaseAgent._running_tasks.get(conversationId)
+@router.post("/stop")
+async def agent_stop(req: StopRequest):
+    event = BaseAgent._running_tasks.get(req.conversationId)
     if event:
         event.set()
-    await publish_stop(conversationId)
+    await publish_stop(req.conversationId)
     if event:
         return ok(None, message="已发送停止信号")
     return ok(None, message="无运行中的任务")
 
 
 @router.post("/shell/confirm")
-async def shell_confirm(confirmId: str = Body(...), approved: bool = Body(...)):
-    ok_result = resolve_confirmation(confirmId, approved)
+async def shell_confirm(req: ShellConfirmRequest):
+    ok_result = resolve_confirmation(req.confirmId, req.approved)
     if not ok_result:
         return error(404, "确认请求不存在或已过期")
-    return ok(None, message="已确认" if approved else "已拒绝")
+    return ok(None, message="已确认" if req.approved else "已拒绝")

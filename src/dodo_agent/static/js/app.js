@@ -307,24 +307,28 @@ createApp({
             }
 
             const apiUrl = APP_API.getStreamChatUrl(backendUrl.value, selectedAgent.value, hasFile && fileIdToSend);
-            const url = new URL(apiUrl);
-            url.searchParams.append('query', message || (hasFile ? '请分析这个文件' : ''));
-            url.searchParams.append('conversationId', currentChatId.value);
-            if (hasFile && fileIdToSend) {
-                url.searchParams.append('fileId', fileIdToSend);
-            }
 
             try {
                 abortController = new AbortController();
                 const signal = abortController.signal;
 
-                const response = await fetch(url.toString(), {
-                    method: 'GET',
+                const body = {
+                    query: message || (hasFile ? '请分析这个文件' : ''),
+                    conversationId: currentChatId.value,
+                };
+                if (hasFile && fileIdToSend) {
+                    body.fileId = fileIdToSend;
+                }
+
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
                     headers: {
+                        'Content-Type': 'application/json',
                         'Accept': 'text/event-stream',
                         'Cache-Control': 'no-cache',
                         'Connection': 'keep-alive'
                     },
+                    body: JSON.stringify(body),
                     signal: signal
                 });
 
@@ -613,7 +617,7 @@ createApp({
             }
 
             try {
-                const response = await fetch(`${backendUrl.value}/session`, { method: 'POST' });
+                const response = await fetch(`${backendUrl.value}/api/v1/session`, { method: 'POST' });
                 const result = await response.json();
                 const cid = result.data.conversationId;
                 const newChat = { id: cid, title: '新对话', messages: [], isNew: true };

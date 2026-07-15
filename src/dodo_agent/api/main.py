@@ -74,9 +74,9 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 
 # ---- 路由 ----
 
-app.include_router(agent_router)
-app.include_router(session_router)
-app.include_router(file_router)
+app.include_router(agent_router, prefix="/api/v1")
+app.include_router(session_router, prefix="/api/v1")
+app.include_router(file_router, prefix="/api/v1")
 
 # ---- 静态文件 ----
 

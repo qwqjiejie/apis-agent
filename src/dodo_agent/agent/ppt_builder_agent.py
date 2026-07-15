@@ -19,14 +19,14 @@ from src.dodo_agent.common.llm import build_llm
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.streaming import AgentStopped, make_event, make_sse
 from src.dodo_agent.config.settings import get_settings
-from src.dodo_agent.storage.models.ai_ppt_inst import AiPptInst, PptInstRepo
+from src.dodo_agent.storage.models.ai_ppt_inst import AiPptInst, PptInstRepo, PptStatus
 
 # =============================================================================
 # 常量
 # =============================================================================
 
 # 状态机顺序：INIT → SCHEMA → OUTLINE → CONTENT → RENDER → SUCCESS
-STATE_ORDER = ["INIT", "SCHEMA", "OUTLINE", "CONTENT", "RENDER", "SUCCESS"]
+STATE_ORDER = [PptStatus.INIT, PptStatus.SCHEMA, PptStatus.OUTLINE, PptStatus.CONTENT, PptStatus.RENDER, PptStatus.SUCCESS]
 
 JSON_PATTERN = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL)
 
@@ -468,23 +468,23 @@ class PptBuilderAgent(BaseAgent):
         - 已完成或失败 → 删除旧记录，创建新实例
         """
         existing = self._repo.find_by_conversation_id(self.conversation_id)
-        if existing and existing.status not in ("SUCCESS", "FAILED"):
+        if existing and existing.status not in (PptStatus.SUCCESS, PptStatus.FAILED):
             logger.info(f"恢复PPT任务: {self.conversation_id}, 状态={existing.status}")
             return existing
-        if existing and existing.status in ("SUCCESS", "FAILED"):
+        if existing and existing.status in (PptStatus.SUCCESS, PptStatus.FAILED):
             self._repo.delete(existing)
             self._repo = PptInstRepo()
         inst = AiPptInst(
             conversation_id=self.conversation_id,
             query=self.query,
-            status="INIT",
+            status=PptStatus.INIT,
             create_time=datetime.now(),
             update_time=datetime.now(),
         )
         self._repo.save(inst)
         return inst
 
-    def _save_inst(self, status: str, **fields):
+    def _save_inst(self, status: PptStatus, **fields):
         """更新实例状态和字段，通过 PptInstRepo.update_status() 持久化。
 
         每个状态处理完成后调用此方法，实现断点续传。
@@ -514,9 +514,9 @@ class PptBuilderAgent(BaseAgent):
             # ---- 加载或创建实例（断点续传） ----
             self._inst = self._load_or_create_inst()
 
-            start_state = self._inst.status or "INIT"
+            start_state = self._inst.status or PptStatus.INIT
             if start_state not in STATE_ORDER:
-                start_state = "INIT"
+                start_state = PptStatus.INIT
 
             start_idx = STATE_ORDER.index(start_state)
             logger.info(f"PPT Builder 启动: conv={self.conversation_id}, 起始状态={start_state}")
@@ -526,7 +526,7 @@ class PptBuilderAgent(BaseAgent):
                 state = STATE_ORDER[i]
 
                 # SUCCESS 状态：PPT 已生成，推送下载链接
-                if state == "SUCCESS":
+                if state == PptStatus.SUCCESS:
                     schema = json.loads(self._inst.ppt_schema or "{}")
                     title = schema.get("title", "output")
                     download_path = f"/agent/pptx/download?conversationId={self.conversation_id}"
@@ -544,7 +544,7 @@ class PptBuilderAgent(BaseAgent):
                 # 根据状态查找对应的 handler
                 handler = STATE_HANDLERS.get(state)
                 if not handler:
-                    self._save_inst("FAILED", error_msg=f"未知状态: {state}")
+                    self._save_inst(PptStatus.FAILED, error_msg=f"未知状态: {state}")
                     yield make_event("error", message=f"未知状态: {state}")
                     break
 
@@ -557,7 +557,7 @@ class PptBuilderAgent(BaseAgent):
                     raise
                 except Exception as e:
                     logger.error(f"PPT状态 {state} 异常: {e}")
-                    self._save_inst("FAILED", error_msg=str(e))
+                    self._save_inst(PptStatus.FAILED, error_msg=str(e))
                     yield make_event("error", message=f"PPT生成失败({state}): {e}")
                     break
 
@@ -592,7 +592,7 @@ async def _handle_init(agent: PptBuilderAgent, llm):
     agent._inst.requirement = data.get("requirement", agent.query)
     agent._inst.template_code = data.get("style", "auto")
     agent._inst.ppt_schema = json.dumps(data, ensure_ascii=False)
-    agent._save_inst("SCHEMA")   # 持久化 → 断点续传
+    agent._save_inst(PptStatus.SCHEMA)   # 持久化 → 断点续传
 
     title = data.get("title", "")
     page_count = data.get("pageCount", 8)
@@ -624,7 +624,7 @@ async def _handle_schema(agent: PptBuilderAgent, llm):
 
     schema_data = {"title": title, "style": style, "slides": slides}
     agent._inst.ppt_schema = json.dumps(schema_data, ensure_ascii=False)
-    agent._save_inst("OUTLINE")
+    agent._save_inst(PptStatus.OUTLINE)
 
     yield make_event("thinking",
                      content=f"PPT结构规划完成，共 {len(slides)} 页")
@@ -650,7 +650,7 @@ async def _handle_outline(agent: PptBuilderAgent, llm):
     outline_slides = data.get("slides", [])
 
     agent._inst.outline = json.dumps(outline_slides, ensure_ascii=False)
-    agent._save_inst("CONTENT")
+    agent._save_inst(PptStatus.CONTENT)
 
     yield make_event("thinking",
                      content=f"大纲生成完成，共 {len(outline_slides)} 页")
@@ -753,7 +753,7 @@ async def _handle_content(agent: PptBuilderAgent, llm):
                          content=f"[{i + 1}/{total}] 已完成：{slide_title}")
 
     # 持久化完整内容数据 → 断点续传
-    agent._save_inst("RENDER",
+    agent._save_inst(PptStatus.RENDER,
                      ppt_schema=json.dumps({
                          "title": theme,
                          "style": schema_data.get("style", "auto"),
@@ -813,16 +813,16 @@ async def _handle_render(agent: PptBuilderAgent, llm):
     if not file_url:
         file_url = f"local://{output_path}"
 
-    agent._save_inst("SUCCESS", file_url=file_url)
+    agent._save_inst(PptStatus.SUCCESS, file_url=file_url)
 
     yield _thinking("PPT文件渲染完成")
 
 
 # 状态 → handler 映射表
 STATE_HANDLERS = {
-    "INIT": _handle_init,
-    "SCHEMA": _handle_schema,
-    "OUTLINE": _handle_outline,
-    "CONTENT": _handle_content,
-    "RENDER": _handle_render,
+    PptStatus.INIT: _handle_init,
+    PptStatus.SCHEMA: _handle_schema,
+    PptStatus.OUTLINE: _handle_outline,
+    PptStatus.CONTENT: _handle_content,
+    PptStatus.RENDER: _handle_render,
 }
