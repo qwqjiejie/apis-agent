@@ -574,9 +574,14 @@ class PptBuilderAgent(BaseAgent):
 # 状态处理器 — 每个状态对应一个 async generator 函数
 # =============================================================================
 
+def _thinking(content: str) -> dict:
+    """PPT 生成进度通知，末尾加两个换行使前端渲染时与后续内容保持间距。"""
+    return make_event("thinking", content=content + "\n\n")
+
+
 async def _handle_init(agent: PptBuilderAgent, llm):
     """INIT → SCHEMA：分析用户需求，生成 PPT 元信息（标题/页数/风格）。"""
-    yield make_event("thinking", content="正在分析PPT需求...")
+    yield _thinking("正在分析PPT需求...")
 
     response = await llm.ainvoke([
         ("system", INIT_PROMPT.format(query=agent.query)),
@@ -598,7 +603,7 @@ async def _handle_init(agent: PptBuilderAgent, llm):
 
 async def _handle_schema(agent: PptBuilderAgent, llm):
     """SCHEMA → OUTLINE：规划每页的页面类型（COVER/CATALOG/CONTENT/COMPARE/END）。"""
-    yield make_event("thinking", content="正在规划PPT结构...")
+    yield _thinking("正在规划PPT结构...")
 
     try:
         init_data = json.loads(agent._inst.ppt_schema or "{}")
@@ -627,7 +632,7 @@ async def _handle_schema(agent: PptBuilderAgent, llm):
 
 async def _handle_outline(agent: PptBuilderAgent, llm):
     """OUTLINE → CONTENT：为每页生成详细大纲要点和配图搜索关键词。"""
-    yield make_event("thinking", content="正在生成详细大纲...")
+    yield _thinking("正在生成详细大纲...")
 
     schema_json = agent._inst.ppt_schema or "{}"
     try:
@@ -672,7 +677,7 @@ async def _handle_content(agent: PptBuilderAgent, llm):
     schema_slides = schema_data.get("slides", [])
     total = len(schema_slides)
 
-    yield make_event("thinking", content=f"正在填充幻灯片内容，共 {total} 页...")
+    yield _thinking(f"正在填充幻灯片内容，共 {total} 页...")
 
     full_slides: list[dict] = []
     for i, schema_slide in enumerate(schema_slides):
@@ -762,7 +767,7 @@ async def _handle_content(agent: PptBuilderAgent, llm):
 
 async def _handle_render(agent: PptBuilderAgent, llm):
     """RENDER → SUCCESS：调用 python-pptx 渲染 PPTX 文件，上传到 MinIO/本地。"""
-    yield make_event("thinking", content="正在渲染PPT文件...")
+    yield _thinking("正在渲染PPT文件...")
 
     full_slides = json.loads(agent._inst.outline or "[]")
     ppt_schema = json.loads(agent._inst.ppt_schema or "{}")
@@ -810,7 +815,7 @@ async def _handle_render(agent: PptBuilderAgent, llm):
 
     agent._save_inst("SUCCESS", file_url=file_url)
 
-    yield make_event("thinking", content="PPT文件渲染完成")
+    yield _thinking("PPT文件渲染完成")
 
 
 # 状态 → handler 映射表

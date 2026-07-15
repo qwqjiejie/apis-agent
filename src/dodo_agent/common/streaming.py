@@ -26,8 +26,6 @@ class AgentStopped(Exception):
 
 def make_event(event_type: str, **kwargs) -> dict:
     payload = {"type": event_type}
-    if event_type == "thinking" and "content" in kwargs:
-        kwargs["content"] = kwargs["content"] + "\n\n"
     payload.update(kwargs)
     return {"event": "message", "data": json.dumps(payload, ensure_ascii=False)}
 
