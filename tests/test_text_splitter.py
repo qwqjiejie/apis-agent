@@ -1,4 +1,4 @@
-from src.dodo_agent.utils.text_splitter import split_text
+from src.apis_agent.utils.text_splitter import split_text
 
 
 class TestSplitText:

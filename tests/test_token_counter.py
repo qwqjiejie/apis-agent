@@ -1,4 +1,4 @@
-from src.dodo_agent.context.token_counter import count_tokens, estimate_messages_tokens
+from src.apis_agent.context.token_counter import count_tokens, estimate_messages_tokens
 
 
 class TestCountTokens:

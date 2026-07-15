@@ -1,0 +1,55 @@
+import logging
+import sys
+
+import uvicorn
+
+from src.apis_agent.common.logger import logger
+from src.apis_agent.config.settings import get_settings
+
+logging.basicConfig(
+    level=get_settings().log_level.upper(),
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+
+def _check_infrastructure():
+    """启动时强制检查基础设施，任一不可用则退出进程。"""
+    from src.apis_agent.storage.db import check_db
+    from src.apis_agent.common.redis import check_redis
+    from src.apis_agent.storage.vector_store import vector_store
+
+    services = [
+        ("MySQL", check_db),
+        ("Redis", check_redis),
+        ("Milvus", vector_store.check_milvus),
+    ]
+
+    failed = False
+    for name, checker in services:
+        try:
+            checker()
+        except Exception as e:
+            logger.error(f"[启动检查] {name}: {e}")
+            failed = True
+
+    if failed:
+        logger.error("基础设施检查失败，服务无法启动")
+        sys.exit(1)
+
+    logger.info("基础设施检查全部通过")
+
+
+def main():
+    _check_infrastructure()
+    uvicorn.run(
+        "src.apis_agent.api.main:app",
+        host=get_settings().server_host,
+        port=get_settings().server_port,
+        log_level=get_settings().log_level.lower(),
+        access_log=False,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,4 @@
-# Dodo-Agent — Python 多智能体平台
+# APIs-Agent — Python 多智能体平台
 
 基于 **FastAPI + LangChain + LangGraph** 构建的多智能体平台，提供智能问答、文件 RAG、PPT 自动生成、深度研究、技能助手等完整 Agent 能力。
 
@@ -40,7 +40,7 @@
 
 ```bash
 git clone <repo-url>
-cd dodo-agent-python
+cd apis-agent
 
 # 创建虚拟环境
 python -m venv .venv
@@ -72,7 +72,7 @@ MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
 MYSQL_USER=root
 MYSQL_PASS=
-MYSQL_DB=dodo
+MYSQL_DB=apis
 
 # 可选：Redis（不配置则降级为本地模式）
 REDIS_HOST=127.0.0.1
@@ -93,7 +93,7 @@ MILVUS_PORT=19530
 ### 3. 启动服务
 
 ```bash
-python src/dodo_agent/main.py
+python src/apis_agent/main.py
 ```
 
 服务启动后访问：
@@ -228,11 +228,11 @@ POST /api/v1/file/upload  (multipart/form-data)
 ## 项目结构
 
 ```
-dodo-agent-python/
+apis-agent/
 ├── pyproject.toml                  # 项目依赖与工具配置
 ├── .env.example                    # 环境变量模板
 │
-├── src/dodo_agent/
+├── src/apis_agent/
 │   ├── main.py                     # Uvicorn 启动入口
 │   │
 │   ├── api/                        # HTTP 传输层
@@ -324,7 +324,7 @@ mypy src/
 4. 在 `api/routes/agent.py` 中添加路由
 
 ```python
-from src.dodo_agent.agent.base_agent import BaseAgent
+from src.apis_agent.agent.base_agent import BaseAgent
 
 class MyAgent(BaseAgent):
     async def run(self):
