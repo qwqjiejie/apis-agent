@@ -1,7 +1,7 @@
 from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI
 
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 
 
 class ChatOpenAIWithReasoning(ChatOpenAI):
@@ -28,8 +28,8 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
 
 def build_llm():
     return ChatOpenAIWithReasoning(
-        model=settings.llm_model,
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
+        model=get_settings().llm_model,
+        api_key=get_settings().llm_api_key,
+        base_url=get_settings().llm_base_url,
         streaming=True,
     )

@@ -3,7 +3,7 @@ import asyncio
 import redis.asyncio as aioredis
 
 from src.dodo_agent.common.logger import logger
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 
 _redis_client: aioredis.Redis | None = None
 _redis_available: bool | None = None
@@ -20,16 +20,16 @@ async def get_redis() -> aioredis.Redis | None:
         return _redis_client
     try:
         _redis_client = aioredis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            db=settings.redis_db,
-            password=settings.redis_password or None,
+            host=get_settings().redis_host,
+            port=get_settings().redis_port,
+            db=get_settings().redis_db,
+            password=get_settings().redis_password or None,
             socket_connect_timeout=2,
             socket_timeout=2,
         )
         await _redis_client.ping()
         _redis_available = True
-        logger.info(f"Redis 连接成功: {settings.redis_host}:{settings.redis_port}")
+        logger.info(f"Redis 连接成功: {get_settings().redis_host}:{get_settings().redis_port}")
         return _redis_client
     except Exception as e:
         _redis_available = False

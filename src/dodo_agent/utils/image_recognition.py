@@ -4,7 +4,7 @@ import os
 
 from openai import OpenAI
 
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 
 logger = logging.getLogger("dodo")
 
@@ -14,7 +14,7 @@ RECOGNITION_PROMPT = "请详细描述这张图片中的内容，包括其中出�
 
 
 def recognize_image(file_path: str) -> str | None:
-    if not settings.vision_model:
+    if not get_settings().vision_model:
         logger.debug("未配置 vision_model，跳过图片识别")
         return None
 
@@ -30,12 +30,12 @@ def recognize_image(file_path: str) -> str | None:
         data_uri = f"data:{mime};base64,{image_data}"
 
         client = OpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
+            api_key=get_settings().llm_api_key,
+            base_url=get_settings().llm_base_url,
         )
 
         response = client.chat.completions.create(
-            model=settings.vision_model,
+            model=get_settings().vision_model,
             messages=[
                 {
                     "role": "user",

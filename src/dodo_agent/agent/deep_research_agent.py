@@ -11,7 +11,7 @@ from src.dodo_agent.common.llm import build_llm
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.streaming import AgentStopped, make_event, make_sse
 from src.dodo_agent.common.tag_parser import StreamingTagParser
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 from src.dodo_agent.tool.tavily_search import tavily_search
 
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
@@ -242,7 +242,7 @@ class DeepResearchAgent(BaseAgent):
         llm = build_llm()
         all_results: list[TaskResult] = []
         # 信号量控制子任务并发上限
-        semaphore = asyncio.Semaphore(settings.deep_research_max_concurrency)
+        semaphore = asyncio.Semaphore(get_settings().deep_research_max_concurrency)
 
         try:
             # ================================================================
@@ -271,7 +271,7 @@ class DeepResearchAgent(BaseAgent):
             # Phase 3: 执行+批判循环
             # ================================================================
             current_topics = topics
-            for iteration in range(1, settings.deep_research_max_iterations + 1):
+            for iteration in range(1, get_settings().deep_research_max_iterations + 1):
                 if self.cancel_event.is_set():
                     raise AgentStopped
 
@@ -301,7 +301,7 @@ class DeepResearchAgent(BaseAgent):
                                  content=f"第 {iteration} 轮执行完成，已收集 {len(all_results)} 个研究结果")
 
                 # --- 批判评估：判断是否需要补充研究 ---
-                if iteration < settings.deep_research_max_iterations:
+                if iteration < get_settings().deep_research_max_iterations:
                     if not all_results:
                         break
 
@@ -326,11 +326,11 @@ class DeepResearchAgent(BaseAgent):
                             title=str(t.get("title", "")),
                             query=str(t.get("query", "")),
                         )
-                        for i, t in enumerate(new_topics[:settings.deep_research_max_sub_tasks])
+                        for i, t in enumerate(new_topics[:get_settings().deep_research_max_sub_tasks])
                     ]
                 else:
                     yield make_event("critique", decision="MAX_ROUNDS",
-                                     content=f"已达最大迭代次数 {settings.deep_research_max_iterations}")
+                                     content=f"已达最大迭代次数 {get_settings().deep_research_max_iterations}")
                     break
 
             # ================================================================
@@ -388,7 +388,7 @@ class DeepResearchAgent(BaseAgent):
 
     async def _phase_planning(self, llm, objective: str) -> list[ResearchTask]:
         """Phase 2: 根据研究目标拆解为子任务列表，JSON 解析失败时回退为单任务模式。"""
-        prompt = PLANNING_PROMPT.format(max_topics=settings.deep_research_max_sub_tasks)
+        prompt = PLANNING_PROMPT.format(max_topics=get_settings().deep_research_max_sub_tasks)
         response = await llm.ainvoke([
             ("system", prompt),
             ("user", f"研究目标：\n{objective}\n\n原始问题：{self.query}"),
@@ -401,7 +401,7 @@ class DeepResearchAgent(BaseAgent):
             return [ResearchTask(id="1", order=1, title="综合研究", query=self.query)]
 
         tasks = []
-        for t in topics_data[:settings.deep_research_max_sub_tasks]:
+        for t in topics_data[:get_settings().deep_research_max_sub_tasks]:
             tasks.append(ResearchTask(
                 id=str(t.get("id", len(tasks) + 1)),
                 order=int(t.get("order", 1)),

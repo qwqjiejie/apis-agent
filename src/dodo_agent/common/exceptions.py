@@ -65,6 +65,11 @@ class FileTooLargeError(ValidationError):
         super().__init__(f"文件不能超过{max_mb}MB大小")
 
 
+class QueryTooLongError(ValidationError):
+    def __init__(self, max_length: int):
+        super().__init__(f"输入内容不能超过{max_length}字符")
+
+
 class UnsupportedFileTypeError(ValidationError):
     def __init__(self, file_type: str):
         super().__init__(f"不支持的文件类型: {file_type}")

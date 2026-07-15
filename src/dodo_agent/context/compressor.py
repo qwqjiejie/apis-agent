@@ -1,11 +1,11 @@
 from src.dodo_agent.common.logger import logger
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 from src.dodo_agent.context.token_counter import estimate_messages_tokens
 
 
 def compress_layer_1(messages: list) -> list:
     """对旧轮次的搜索结果和长回答做占位符压缩，保留最近 N 轮完整内容。"""
-    keep = settings.compression_layer_1_keep_recent_rounds
+    keep = get_settings().compression_layer_1_keep_recent_rounds
     rounds = _split_rounds(messages)
     if len(rounds) <= keep:
         return messages
@@ -47,7 +47,7 @@ def _split_rounds(messages: list) -> list[list]:
 
 async def compress_layer_2(messages: list, llm, max_tokens: int) -> list:
     """用 LLM 将旧轮次摘要为一句话，注入为 system 消息。"""
-    keep = settings.compression_layer_1_keep_recent_rounds
+    keep = get_settings().compression_layer_1_keep_recent_rounds
     rounds = _split_rounds(messages)
     if len(rounds) <= keep:
         return messages

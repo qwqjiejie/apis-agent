@@ -3,7 +3,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 
 logger = logging.getLogger("dodo")
 
@@ -16,11 +16,11 @@ def embedding_available() -> bool:
     if _available is None:
         try:
             client = _client()
-            resp = client.embeddings.create(model=settings.embedding_model, input=["test"])
+            resp = client.embeddings.create(model=get_settings().embedding_model, input=["test"])
             global _dim
             _dim = len(resp.data[0].embedding)
             _available = True
-            logger.info(f"Embedding 服务可用, model={settings.embedding_model}, dim={_dim}")
+            logger.info(f"Embedding 服务可用, model={get_settings().embedding_model}, dim={_dim}")
         except Exception as e:
             logger.warning(f"Embedding 不可用: {e}")
             _available = False
@@ -30,18 +30,18 @@ def embedding_available() -> bool:
 def embedding_dim() -> int:
     if _available is None:
         embedding_available()
-    return _dim or settings.embedding_dim
+    return _dim or get_settings().embedding_dim
 
 
 def _client() -> OpenAI:
-    return OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    return OpenAI(api_key=get_settings().llm_api_key, base_url=get_settings().llm_base_url)
 
 
 def embed_texts(texts: list[str]) -> list[list[float]] | None:
     if not texts:
         return []
     try:
-        resp = _client().embeddings.create(model=settings.embedding_model, input=texts)
+        resp = _client().embeddings.create(model=get_settings().embedding_model, input=texts)
         return [d.embedding for d in resp.data]
     except Exception as e:
         logger.error(f"Embedding 失败: {e}")

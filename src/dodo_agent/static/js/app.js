@@ -20,6 +20,21 @@ createApp({
         const isSending = ref(false);
         const currentRecommendMsgId = ref(null);
 
+        // Toast 通知状态
+        const toast = ref({ visible: false, message: '', type: 'error' });
+        let toastTimer = null;
+
+        const showToast = (message, type = 'error') => {
+            if (toastTimer) clearTimeout(toastTimer);
+            toast.value = { visible: true, message, type };
+            toastTimer = setTimeout(() => { toast.value.visible = false; }, 3000);
+        };
+
+        const hideToast = () => {
+            if (toastTimer) clearTimeout(toastTimer);
+            toast.value.visible = false;
+        };
+
         // 确认对话框状态
         const showConfirmDialog = ref(false);
         const confirmTitle = ref('确认操作');
@@ -168,7 +183,7 @@ createApp({
                         }
                     }
                 } else {
-                    alert('删除失败: ' + (result.message || result.error || '未知错误'));
+                    showToast('删除失败: ' + (result.message || result.error || '未知错误'));
                 }
                 showConfirmDialog.value = false;
             };
@@ -180,7 +195,7 @@ createApp({
             const files = event.target.files;
             if (files.length > 0) {
                 if (selectedFile.value) {
-                    alert('已上传文件，请先删除当前文件再上传新文件（限1个）');
+                    showToast('已上传文件，请先删除当前文件再上传新文件（限1个）');
                     return;
                 }
                 await handleFile(files[0]);
@@ -199,7 +214,7 @@ createApp({
                 const fileExt = file.name.split('.').pop().toLowerCase();
 
                 if (!validTypes.includes(file.type) && !validExts.includes(fileExt)) {
-                    alert('不支持的文件类型，仅支持 PDF、Word、TXT、PNG、JPG 格式');
+                    showToast('不支持的文件类型，仅支持 PDF、Word、TXT、PNG、JPG 格式');
                     removeFile();
                     return;
                 }
@@ -208,7 +223,7 @@ createApp({
                 uploadedFileId.value = result.fileId;
             } catch (error) {
                 console.error('文件上传错误:', error);
-                alert('文件上传失败: ' + error.message);
+                showToast(error.message);
                 removeFile();
             } finally {
                 isUploading.value = false;
@@ -314,7 +329,16 @@ createApp({
                 });
 
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    let errorMsg = `请求失败 (${response.status})`;
+                    try {
+                        const errorBody = await response.json();
+                        if (errorBody && errorBody.message) {
+                            errorMsg = errorBody.message;
+                        }
+                    } catch (e) {
+                        // 响应体不是 JSON，使用默认错误消息
+                    }
+                    throw new Error(errorMsg);
                 }
 
                 const reader = response.body.getReader();
@@ -424,8 +448,15 @@ createApp({
             } catch (error) {
                 console.error('请求错误:', error);
                 if (error.name !== 'AbortError') {
-                    aiMsg.content += '\n\n⚠️ 请求出错: ' + error.message;
-                    updateStreamContent(aiMsg.content);
+                    showToast(error.message);
+                    // 移除不合法的 user + assistant 消息对
+                    const chat = currentChat.value;
+                    if (chat && chat.messages.length >= 2) {
+                        const lastTwo = chat.messages.slice(-2);
+                        if (lastTwo[0].role === 'user' && lastTwo[1].role === 'assistant') {
+                            chat.messages.splice(chat.messages.length - 2, 2);
+                        }
+                    }
                 }
                 isSending.value = false;
                 abortController = null;
@@ -693,6 +724,9 @@ createApp({
         });
 
         return {
+            toast,
+            showToast,
+            hideToast,
             backendUrl,
             connectionError,
             agents,

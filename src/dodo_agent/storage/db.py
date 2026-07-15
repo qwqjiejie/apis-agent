@@ -3,7 +3,7 @@ from sqlalchemy.orm import sessionmaker, Session
 
 from src.dodo_agent.common.exceptions import DatabaseError
 from src.dodo_agent.common.logger import logger
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 
 _engine = None
 _SessionLocal: sessionmaker | None = None
@@ -13,7 +13,7 @@ _db_available: bool | None = None
 def get_engine():
     global _engine
     if _engine is None:
-        url = f"mysql+pymysql://{settings.mysql_user}:{settings.mysql_pass}@{settings.mysql_host}:{settings.mysql_port}/{settings.mysql_db}?charset=utf8mb4"
+        url = f"mysql+pymysql://{get_settings().mysql_user}:{get_settings().mysql_pass}@{get_settings().mysql_host}:{get_settings().mysql_port}/{get_settings().mysql_db}?charset=utf8mb4"
         _engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600)
     return _engine
 
@@ -31,7 +31,7 @@ def is_db_available() -> bool:
         s.execute(text("SELECT 1"))
         s.close()
         _db_available = True
-        logger.info(f"MySQL 连接成功: {settings.mysql_host}:{settings.mysql_port}")
+        logger.info(f"MySQL 连接成功: {get_settings().mysql_host}:{get_settings().mysql_port}")
     except Exception as e:
         _db_available = False
         logger.warning(f"MySQL 不可用: {e}")

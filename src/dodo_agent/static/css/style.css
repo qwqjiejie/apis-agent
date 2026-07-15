@@ -1267,3 +1267,44 @@ textarea::placeholder {
     .agent-item { padding: 7px 12px; font-size: 12px; }
     .empty-state h2 { font-size: 24px; }
 }
+
+/* ===== Toast 通知 ===== */
+.toast-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    pointer-events: none;
+    animation: toastFadeIn 0.2s ease;
+}
+
+.toast-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 24px;
+    border-radius: 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color, #333);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    max-width: 380px;
+    pointer-events: auto;
+}
+
+.toast-box .toast-icon { font-size: 20px; flex-shrink: 0; }
+.toast-box.error .toast-icon { color: #e94560; }
+.toast-box.success .toast-icon { color: #52c41a; }
+.toast-box.info .toast-icon { color: var(--blue); }
+
+.toast-message {
+    font-size: 14px;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+
+@keyframes toastFadeIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}

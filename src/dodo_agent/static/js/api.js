@@ -118,7 +118,16 @@ const uploadFile = async (backendUrl, file) => {
     });
 
     if (!response.ok) {
-        throw new Error('文件上传失败');
+        let errorMsg = '文件上传失败';
+        try {
+            const errorBody = await response.json();
+            if (errorBody && errorBody.message) {
+                errorMsg = errorBody.message;
+            }
+        } catch (e) {
+            // 响应体不是 JSON，使用默认错误消息
+        }
+        throw new Error(errorMsg);
     }
 
     const result = await response.json();

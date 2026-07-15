@@ -2,7 +2,7 @@ import logging
 
 from pymilvus import MilvusClient, DataType
 
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 from src.dodo_agent.service.embedding_service import embedding_dim
 
 logger = logging.getLogger("dodo")
@@ -21,16 +21,16 @@ class VectorStore:
     def __init__(self):
         self._client: MilvusClient | None = None
         self._ready = False
-        if settings.milvus_host:
+        if get_settings().milvus_host:
             self._connect()
 
     def _connect(self):
         try:
-            uri = f"http://{settings.milvus_host}:{settings.milvus_port}"
-            token = f"{settings.milvus_user}:{settings.milvus_pass}" if settings.milvus_user else None
+            uri = f"http://{get_settings().milvus_host}:{get_settings().milvus_port}"
+            token = f"{get_settings().milvus_user}:{get_settings().milvus_pass}" if get_settings().milvus_user else None
 
             self._client = MilvusClient(uri=uri, token=token)
-            db_name = settings.milvus_db or "default"
+            db_name = get_settings().milvus_db or "default"
             if db_name != "default":
                 dbs = [d for d in self._client.list_databases()]
                 if db_name not in dbs:

@@ -288,6 +288,18 @@
             <button @click="testConnection" class="retry-btn">重试</button>
         </div>
 
+        <!-- Toast 通知 -->
+        <div v-if="toast.visible" class="toast-overlay" @click="hideToast">
+            <div class="toast-box" :class="toast.type" @click.stop>
+                <div class="toast-icon">
+                    <i v-if="toast.type === 'error'" class="fas fa-exclamation-circle"></i>
+                    <i v-else-if="toast.type === 'success'" class="fas fa-check-circle"></i>
+                    <i v-else class="fas fa-info-circle"></i>
+                </div>
+                <p class="toast-message">{{ toast.message }}</p>
+            </div>
+        </div>
+
         <!-- 自定义确认对话框 -->
         <div v-if="showConfirmDialog" class="confirm-dialog-overlay">
             <div class="confirm-dialog">

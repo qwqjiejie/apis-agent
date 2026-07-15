@@ -10,7 +10,7 @@ from minio import Minio
 from minio.error import S3Error
 
 from src.dodo_agent.service.embedding_service import embed_texts, embedding_available
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 from src.dodo_agent.common.exceptions import FileTooLargeError, UnsupportedFileTypeError
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.storage.db import new_session
@@ -27,16 +27,16 @@ class FileService:
     def __init__(self):
         self._db_ok = new_session() is not None
         self._minio = self._build_minio()
-        self._upload_dir = Path(settings.upload_dir)
+        self._upload_dir = Path(get_settings().upload_dir)
 
     def _build_minio(self) -> Minio | None:
-        if not settings.minio_endpoint:
+        if not get_settings().minio_endpoint:
             return None
         try:
             return Minio(
-                settings.minio_endpoint,
-                access_key=settings.minio_access_key,
-                secret_key=settings.minio_secret_key,
+                get_settings().minio_endpoint,
+                access_key=get_settings().minio_access_key,
+                secret_key=get_settings().minio_secret_key,
                 secure=False,
             )
         except Exception:
@@ -46,8 +46,8 @@ class FileService:
         if not self._minio:
             return
         try:
-            if not self._minio.bucket_exists(settings.minio_bucket):
-                self._minio.make_bucket(settings.minio_bucket)
+            if not self._minio.bucket_exists(get_settings().minio_bucket):
+                self._minio.make_bucket(get_settings().minio_bucket)
         except S3Error:
             pass
 
@@ -62,8 +62,8 @@ class FileService:
 
         content = file.file.read()
         file_size = len(content)
-        if file_size > settings.max_upload_size_mb * 1024 * 1024:
-            raise FileTooLargeError(settings.max_upload_size_mb)
+        if file_size > get_settings().max_upload_size_mb * 1024 * 1024:
+            raise FileTooLargeError(get_settings().max_upload_size_mb)
 
         local_path = ""
         minio_path = ""
@@ -75,7 +75,7 @@ class FileService:
                 date_prefix = datetime.now().strftime("%Y-%m-%d")
                 obj_name = f"upload_file/{date_prefix}/{original_name}"
                 self._minio.put_object(
-                    settings.minio_bucket, obj_name,
+                    get_settings().minio_bucket, obj_name,
                     data=io.BytesIO(content), length=file_size,
                 )
                 minio_path = obj_name
@@ -193,7 +193,7 @@ class FileService:
             if info:
                 if self._minio and info.minio_path:
                     try:
-                        self._minio.remove_object(settings.minio_bucket, info.minio_path)
+                        self._minio.remove_object(get_settings().minio_bucket, info.minio_path)
                     except S3Error:
                         pass
                 if vector_store.ready:

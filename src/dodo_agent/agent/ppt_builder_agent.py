@@ -18,7 +18,7 @@ from src.dodo_agent.agent.base_agent import BaseAgent
 from src.dodo_agent.common.llm import build_llm
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.streaming import AgentStopped, make_event, make_sse
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 from src.dodo_agent.storage.models.ai_ppt_inst import AiPptInst, PptInstRepo
 
 # =============================================================================
@@ -160,10 +160,10 @@ PPT主题：{theme}
 
 async def _search_images(keywords: str, max_count: int = 2) -> list[str]:
     """通过 Tavily API 搜索配图，返回图片 URL 列表。"""
-    if not keywords or not settings.tavily_api_key:
+    if not keywords or not get_settings().tavily_api_key:
         return []
     try:
-        client = TavilyClient(api_key=settings.tavily_api_key)
+        client = TavilyClient(api_key=get_settings().tavily_api_key)
         response = await asyncio.to_thread(
             client.search, keywords, include_images=True, max_results=max_count
         )
@@ -740,7 +740,7 @@ async def _handle_content(agent: PptBuilderAgent, llm):
             if images:
                 img_bytes = await _download_image(images[0])
                 if img_bytes:
-                    img_dir = Path(settings.upload_dir) / "pptx_images"
+                    img_dir = Path(get_settings().upload_dir) / "pptx_images"
                     img_dir.mkdir(parents=True, exist_ok=True)
                     img_name = f"{uuid.uuid4().hex[:12]}.png"
                     img_path = img_dir / img_name
@@ -774,7 +774,7 @@ async def _handle_render(agent: PptBuilderAgent, llm):
     title = ppt_schema.get("title", agent.query)
 
     # 生成 PPTX 文件
-    output_dir = Path(settings.upload_dir) / "pptx"
+    output_dir = Path(get_settings().upload_dir) / "pptx"
     output_dir.mkdir(parents=True, exist_ok=True)
     file_name = f"{uuid.uuid4().hex[:12]}.pptx"
     output_path = output_dir / file_name
@@ -796,17 +796,17 @@ async def _handle_render(agent: PptBuilderAgent, llm):
     from minio.error import S3Error
 
     file_url = ""
-    if settings.minio_endpoint:
+    if get_settings().minio_endpoint:
         try:
             client = Minio(
-                settings.minio_endpoint,
-                access_key=settings.minio_access_key,
-                secret_key=settings.minio_secret_key,
+                get_settings().minio_endpoint,
+                access_key=get_settings().minio_access_key,
+                secret_key=get_settings().minio_secret_key,
                 secure=False,
             )
             obj_name = f"pptx/{file_name}"
-            client.fput_object(settings.minio_bucket, obj_name, str(output_path))
-            file_url = f"minio://{settings.minio_bucket}/{obj_name}"
+            client.fput_object(get_settings().minio_bucket, obj_name, str(output_path))
+            file_url = f"minio://{get_settings().minio_bucket}/{obj_name}"
         except S3Error as e:
             logger.error(f"MinIO上传PPT失败: {e}")
 

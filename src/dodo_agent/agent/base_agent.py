@@ -9,8 +9,9 @@ from src.dodo_agent.service.rag_service import build_context
 from src.dodo_agent.service.session_service import store
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.redis import acquire_lock, listen_stop, release_lock
+from src.dodo_agent.common.exceptions import QueryTooLongError
 from src.dodo_agent.common.streaming import AgentStopped, make_event, make_sse
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 from src.dodo_agent.context.compressor import compress_layer_1, compress_layer_2
 from src.dodo_agent.context.token_counter import estimate_messages_tokens
 
@@ -115,6 +116,8 @@ class BaseAgent(ABC):
     _running_tasks: dict[str, asyncio.Event] = {}
 
     def __init__(self, conversation_id: str, query: str, file_id: str = ""):
+        if len(query) > get_settings().max_query_length:
+            raise QueryTooLongError(get_settings().max_query_length)
         self.conversation_id = conversation_id
         self.query = query
         self.file_id = file_id
@@ -137,7 +140,7 @@ class BaseAgent(ABC):
         2. 本地 _running_tasks 字典（同进程兜底）
         """
         # 第一层：Redis 分布式锁
-        lock_ok = await acquire_lock(self.conversation_id, ttl=settings.task_lock_timeout_seconds)
+        lock_ok = await acquire_lock(self.conversation_id, ttl=get_settings().task_lock_timeout_seconds)
         if not lock_ok:
             return False, [
                 make_sse(json.dumps({"type": "error", "content": "当前会话有任务正在执行中，请稍后再试"}, ensure_ascii=False)),
@@ -171,20 +174,20 @@ class BaseAgent(ABC):
         4. 如果有 fileId，拼接 RAG 检索结果
         """
         # 加载历史并转为消息列表
-        history = store.load_history(self.conversation_id, limit=settings.max_history_rounds)
+        history = store.load_history(self.conversation_id, limit=get_settings().max_history_rounds)
         messages = _build_history_messages(history)
 
         # Layer 1：占位符压缩（同步，不阻塞首 token）
-        if settings.compression_enabled:
+        if get_settings().compression_enabled:
             messages = compress_layer_1(messages)
 
         # Token 估算 + Layer 2 触发
         pre_messages = messages + [("user", self.query)]
         token_count = estimate_messages_tokens(pre_messages)
         self._input_tokens = token_count
-        threshold = int(settings.max_context_tokens * settings.compression_layer_2_threshold_ratio)
+        threshold = int(get_settings().max_context_tokens * get_settings().compression_layer_2_threshold_ratio)
         if token_count > threshold:
-            logger.info(f"Token 超阈值 ({token_count}/{settings.max_context_tokens})，触发 Layer 2 压缩（后台）")
+            logger.info(f"Token 超阈值 ({token_count}/{get_settings().max_context_tokens})，触发 Layer 2 压缩（后台）")
             # 后台异步执行，不阻塞首 token
             asyncio.create_task(self._bg_compress(pre_messages))
 
@@ -205,7 +208,7 @@ class BaseAgent(ABC):
         """后台异步执行 Layer 2 LLM 摘要压缩。失败不影响主流程。"""
         try:
             llm = build_llm()
-            await compress_layer_2(messages, llm, settings.max_context_tokens)
+            await compress_layer_2(messages, llm, get_settings().max_context_tokens)
         except Exception as e:
             logger.warning(f"Layer 2 压缩失败: {e}")
 

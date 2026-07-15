@@ -1,13 +1,13 @@
 import tiktoken
 
-from src.dodo_agent.config.settings import settings
+from src.dodo_agent.config.settings import get_settings
 
 _ENCODING_CACHE: dict[str, tiktoken.Encoding] = {}
 _DEFAULT_ENCODING = "o200k_base"
 
 
 def _get_encoding(model: str | None = None) -> tiktoken.Encoding:
-    name = model or settings.llm_model
+    name = model or get_settings().llm_model
     if name not in _ENCODING_CACHE:
         try:
             _ENCODING_CACHE[name] = tiktoken.encoding_for_model(name)
