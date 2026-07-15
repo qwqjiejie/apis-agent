@@ -4,9 +4,9 @@ import time
 from abc import ABC, abstractmethod
 
 from src.dodo_agent.common.llm import build_llm
-from src.dodo_agent.api.file_service import file_service
-from src.dodo_agent.api.rag_service import build_context
-from src.dodo_agent.api.session import store
+from src.dodo_agent.service.file_service import file_service
+from src.dodo_agent.service.rag_service import build_context
+from src.dodo_agent.service.session_service import store
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.redis import acquire_lock, listen_stop, release_lock
 from src.dodo_agent.common.streaming import AgentStopped, make_event, make_sse

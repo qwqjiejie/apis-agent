@@ -59,5 +59,5 @@ def _parse_txt(file_path: str) -> str:
 
 
 def _parse_image(file_path: str) -> str | None:
-    from src.dodo_agent.tool.image_recognition import recognize_image
+    from src.dodo_agent.utils.image_recognition import recognize_image
     return recognize_image(file_path)

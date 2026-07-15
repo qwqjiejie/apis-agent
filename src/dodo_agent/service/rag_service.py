@@ -1,6 +1,6 @@
 import logging
 
-from src.dodo_agent.api.embedding_service import embed_query, embedding_available
+from src.dodo_agent.service.embedding_service import embed_query, embedding_available
 from src.dodo_agent.storage.vector_store import vector_store
 
 logger = logging.getLogger("dodo")

@@ -3,7 +3,7 @@ import logging
 from pymilvus import MilvusClient, DataType
 
 from src.dodo_agent.config.settings import settings
-from src.dodo_agent.api.embedding_service import embedding_dim
+from src.dodo_agent.service.embedding_service import embedding_dim
 
 logger = logging.getLogger("dodo")
 
