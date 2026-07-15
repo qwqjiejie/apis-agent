@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import os
 import re
 import uuid
@@ -15,37 +14,32 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt, Emu
 from tavily import TavilyClient
 
-from src.dodo_agent.agent.react_agent import build_llm
+from src.dodo_agent.agent.base_agent import BaseAgent
+from src.dodo_agent.common.llm import build_llm
+from src.dodo_agent.common.logger import logger
+from src.dodo_agent.common.streaming import AgentStopped, make_event, make_sse
 from src.dodo_agent.config.settings import settings
-from src.dodo_agent.storage.db import new_session
 from src.dodo_agent.storage.models.ai_ppt_inst import AiPptInst, PptInstRepo
 
-logger = logging.getLogger("dodo")
+# =============================================================================
+# 常量
+# =============================================================================
 
+# 状态机顺序：INIT → SCHEMA → OUTLINE → CONTENT → RENDER → SUCCESS
 STATE_ORDER = ["INIT", "SCHEMA", "OUTLINE", "CONTENT", "RENDER", "SUCCESS"]
 
 JSON_PATTERN = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL)
 
 
-class _AgentStopped(Exception):
-    pass
-
-
-# ---- helpers ----
-
-def _make_event(event_type: str, **kwargs) -> dict:
-    payload = {"type": event_type}
-    if event_type == "thinking" and "content" in kwargs:
-        kwargs["content"] = kwargs["content"] + "\n\n"
-    payload.update(kwargs)
-    return {"event": "message", "data": json.dumps(payload, ensure_ascii=False)}
-
-
-def _make_sse(text: str) -> dict:
-    return {"event": "message", "data": text}
-
+# =============================================================================
+# 工具函数
+# =============================================================================
 
 def _parse_json(text: str) -> dict | None:
+    """从 LLM 输出中解析 JSON。两层容错：
+    1. 优先匹配 ```json ... ``` 代码块
+    2. 回退到匹配最外层 { ... } 对象
+    """
     m = JSON_PATTERN.search(text)
     json_str = m.group(1) if m else text
     try:
@@ -61,36 +55,9 @@ def _parse_json(text: str) -> dict | None:
     return None
 
 
-def _load_or_create_inst(conversation_id: str, query: str) -> AiPptInst:
-    repo = PptInstRepo()
-    existing = repo.find_by_conversation_id(conversation_id)
-    if existing and existing.status not in ("SUCCESS", "FAILED"):
-        logger.info(f"恢复PPT任务: {conversation_id}, 状态={existing.status}")
-        return existing
-    if existing and existing.status in ("SUCCESS", "FAILED"):
-        repo.delete(existing)
-    inst = AiPptInst(
-        conversation_id=conversation_id,
-        query=query,
-        status="INIT",
-        create_time=datetime.now(),
-        update_time=datetime.now(),
-    )
-    repo.save(inst)
-    return inst
-
-
-def _save_inst(inst: AiPptInst):
-    inst.update_time = datetime.now()
-    repo = PptInstRepo()
-    repo._s.merge(inst)
-    repo._s.flush()
-    if repo._own_session:
-        repo._s.commit()
-    repo.close()
-
-
-# ---- prompts ----
+# =============================================================================
+# LLM Prompts — 五阶段提示词
+# =============================================================================
 
 INIT_PROMPT = """你是一个专业的PPT设计顾问。分析用户的需求，生成一份结构清晰的PPT需求说明。
 
@@ -187,9 +154,12 @@ PPT主题：{theme}
 规则：bullets中每条20-40字，简洁有力。只输出JSON。"""
 
 
-# ---- Tavily image search ----
+# =============================================================================
+# Tavily 图片搜索
+# =============================================================================
 
 async def _search_images(keywords: str, max_count: int = 2) -> list[str]:
+    """通过 Tavily API 搜索配图，返回图片 URL 列表。"""
     if not keywords or not settings.tavily_api_key:
         return []
     try:
@@ -205,6 +175,7 @@ async def _search_images(keywords: str, max_count: int = 2) -> list[str]:
 
 
 async def _download_image(url: str) -> bytes | None:
+    """下载图片到内存，15 秒超时。"""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url)
@@ -215,17 +186,20 @@ async def _download_image(url: str) -> bytes | None:
     return None
 
 
-# ---- PPTX renderer ----
+# =============================================================================
+# PPTX 渲染引擎 — python-pptx 底层操作
+# =============================================================================
 
-SLIDE_WIDTH = Inches(13.333)
+SLIDE_WIDTH = Inches(13.333)    # 宽屏 16:9
 SLIDE_HEIGHT = Inches(7.5)
 
-PRIMARY_COLOR = RGBColor(0x1A, 0x1A, 0x2E)
-ACCENT_COLOR = RGBColor(0x00, 0x72, 0xD8)
+# 配色方案
+PRIMARY_COLOR = RGBColor(0x1A, 0x1A, 0x2E)     # 深蓝黑（封面/结束页背景）
+ACCENT_COLOR = RGBColor(0x00, 0x72, 0xD8)       # 亮蓝（强调色）
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 DARK_TEXT = RGBColor(0x33, 0x33, 0x33)
 LIGHT_BG = RGBColor(0xF5, 0xF7, 0xFA)
-ACCENT_ORANGE = RGBColor(0xE9, 0x45, 0x60)
+ACCENT_ORANGE = RGBColor(0xE9, 0x45, 0x60)      # 橙红（对比页右侧强调）
 GRAY_TEXT = RGBColor(0x88, 0x88, 0x88)
 
 FONT_TITLE = "Arial"
@@ -233,11 +207,13 @@ FONT_BODY = "Arial"
 
 
 def _add_blank_slide(prs: Presentation) -> object:
+    """创建空白幻灯片（layout index 6 = blank layout）。"""
     layout = prs.slide_layouts[6]
     return prs.slides.add_slide(layout)
 
 
 def _set_slide_bg(slide, color: RGBColor):
+    """设置幻灯片纯色背景。"""
     bg = slide.background
     fill = bg.fill
     fill.solid()
@@ -247,6 +223,7 @@ def _set_slide_bg(slide, color: RGBColor):
 def _add_textbox(slide, left, top, width, height, text: str,
                  font_size: int = 18, bold: bool = False, color: RGBColor = DARK_TEXT,
                  alignment: int = PP_ALIGN.LEFT, font_name: str = FONT_BODY):
+    """在幻灯片上添加文本框，返回 text_frame 供后续操作。"""
     txBox = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     tf = txBox.text_frame
     tf.word_wrap = True
@@ -262,6 +239,7 @@ def _add_textbox(slide, left, top, width, height, text: str,
 
 def _add_bullet_frame(slide, left, top, width, height, bullets: list[str],
                       font_size: int = 16, color: RGBColor = DARK_TEXT):
+    """添加项目符号列表文本框。"""
     txBox = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     tf = txBox.text_frame
     tf.word_wrap = True
@@ -280,6 +258,7 @@ def _add_bullet_frame(slide, left, top, width, height, bullets: list[str],
 
 
 def _add_image_safe(slide, image_bytes: bytes, left, top, width, height) -> bool:
+    """安全插入图片，失败时返回 False 而非崩溃。"""
     try:
         stream = BytesIO(image_bytes)
         slide.shapes.add_picture(stream, Inches(left), Inches(top), Inches(width), Inches(height))
@@ -290,6 +269,7 @@ def _add_image_safe(slide, image_bytes: bytes, left, top, width, height) -> bool
 
 
 def _add_accent_bar(slide, left, top, width, height, color: RGBColor = ACCENT_COLOR):
+    """添加装饰色条（矩形形状，无边框）。"""
     shape = slide.shapes.add_shape(
         1, Inches(left), Inches(top), Inches(width), Inches(height))
     shape.fill.solid()
@@ -298,6 +278,12 @@ def _add_accent_bar(slide, left, top, width, height, color: RGBColor = ACCENT_CO
 
 
 def render_pptx(slides_data: list[dict], title: str, output_path: str):
+    """将幻灯片数据列表渲染为 PPTX 文件。
+
+    根据每页的 pageType 分发到对应的渲染函数：
+    COVER → _render_cover / CATALOG → _render_catalog
+    CONTENT → _render_content / COMPARE → _render_compare / END → _render_end
+    """
     prs = Presentation()
     prs.slide_width = SLIDE_WIDTH
     prs.slide_height = SLIDE_HEIGHT
@@ -320,7 +306,10 @@ def render_pptx(slides_data: list[dict], title: str, output_path: str):
     logger.info(f"PPTX已生成: {output_path}, 共{len(slides_data)}页")
 
 
+# ---- 各页面类型渲染函数 ----
+
 def _render_cover(prs, s, title):
+    """封面页：深色背景 + 大标题 + 描述 + 装饰线。"""
     slide = _add_blank_slide(prs)
     _set_slide_bg(slide, PRIMARY_COLOR)
 
@@ -341,6 +330,7 @@ def _render_cover(prs, s, title):
 
 
 def _render_catalog(prs, s):
+    """目录页：白色背景 + 左侧装饰线 + 编号章节列表。"""
     slide = _add_blank_slide(prs)
     _set_slide_bg(slide, WHITE)
 
@@ -365,6 +355,7 @@ def _render_catalog(prs, s):
 
 
 def _render_content(prs, s):
+    """正文内容页：白色背景 + 顶部装饰线 + 标题 + 项目符号 + 可选配图。"""
     slide = _add_blank_slide(prs)
     _set_slide_bg(slide, WHITE)
 
@@ -397,6 +388,7 @@ def _render_content(prs, s):
 
 
 def _render_compare(prs, s):
+    """对比页：左右双栏布局，中间 VS 分隔。"""
     slide = _add_blank_slide(prs)
     _set_slide_bg(slide, WHITE)
 
@@ -409,6 +401,7 @@ def _render_compare(prs, s):
     left_bullets = s.get("leftBullets", []) or s.get("leftContent", [])
     right_bullets = s.get("rightBullets", []) or s.get("rightContent", [])
 
+    # 左侧栏
     _add_accent_bar(slide, 1.0, 1.6, 5.0, 0.04, ACCENT_COLOR)
     _add_textbox(slide, 1.0, 1.8, 5.0, 0.5,
                  left_title, font_size=24, bold=True, color=ACCENT_COLOR)
@@ -417,6 +410,7 @@ def _render_compare(prs, s):
         _add_bullet_frame(slide, 1.0, 2.4, 5.0, 4.2,
                           left_bullets, font_size=15)
 
+    # 右侧栏
     _add_accent_bar(slide, 7.0, 1.6, 5.0, 0.04, ACCENT_ORANGE)
     _add_textbox(slide, 7.0, 1.8, 5.0, 0.5,
                  right_title, font_size=24, bold=True, color=ACCENT_ORANGE)
@@ -431,6 +425,7 @@ def _render_compare(prs, s):
 
 
 def _render_end(prs, s):
+    """结束页：深色背景 + 居中大标题 + 描述。"""
     slide = _add_blank_slide(prs)
     _set_slide_bg(slide, PRIMARY_COLOR)
 
@@ -445,44 +440,177 @@ def _render_end(prs, s):
                      alignment=PP_ALIGN.CENTER)
 
 
-# ---- state handlers ----
+# =============================================================================
+# PptBuilderAgent — 状态机驱动的 PPT 自动生成
+# =============================================================================
 
-async def _handle_init(inst: AiPptInst, llm, cancel_event: asyncio.Event):
-    yield _make_event("thinking", content="正在分析PPT需求...")
+class PptBuilderAgent(BaseAgent):
+    """PPT 生成 Agent，五阶段状态机。
+
+    状态流转：INIT → SCHEMA → OUTLINE → CONTENT → RENDER → SUCCESS
+
+    关键特性：
+    - 断点续传：每个状态完成后写入 MySQL，中断后可从任意状态恢复
+    - Tavily 搜图：为 CONTENT 页自动搜索配图并下载嵌入
+    - python-pptx 渲染：5 种页面类型（COVER/CATALOG/CONTENT/COMPARE/END）
+    - SSE 实时进度：每页生成进度通过 thinking 事件推送前端
+    """
+
+    def __init__(self, conversation_id: str, query: str, file_id: str = ""):
+        super().__init__(conversation_id, query, file_id)
+        self._inst: AiPptInst | None = None   # PPT 实例（数据库持久化对象）
+        self._repo = PptInstRepo()            # 数据访问层
+
+    def _load_or_create_inst(self) -> AiPptInst:
+        """加载已有实例（断点续传）或创建新实例。
+
+        - 未完成状态（非 SUCCESS/FAILED）→ 恢复执行
+        - 已完成或失败 → 删除旧记录，创建新实例
+        """
+        existing = self._repo.find_by_conversation_id(self.conversation_id)
+        if existing and existing.status not in ("SUCCESS", "FAILED"):
+            logger.info(f"恢复PPT任务: {self.conversation_id}, 状态={existing.status}")
+            return existing
+        if existing and existing.status in ("SUCCESS", "FAILED"):
+            self._repo.delete(existing)
+            self._repo = PptInstRepo()
+        inst = AiPptInst(
+            conversation_id=self.conversation_id,
+            query=self.query,
+            status="INIT",
+            create_time=datetime.now(),
+            update_time=datetime.now(),
+        )
+        self._repo.save(inst)
+        return inst
+
+    def _save_inst(self, status: str, **fields):
+        """更新实例状态和字段，通过 PptInstRepo.update_status() 持久化。
+
+        每个状态处理完成后调用此方法，实现断点续传。
+        """
+        self._repo.update_status(self._inst, status, **fields)
+
+    async def run(self):
+        """状态机主循环：从当前状态开始逐步执行，直至 SUCCESS 或 FAILED。
+
+        流程：
+        1. 获取锁 → 加载或创建实例
+        2. 从当前状态开始遍历 STATE_ORDER
+        3. 每个状态调用对应的 handler 函数
+        4. handler 完成后 _save_inst 持久化状态
+        5. SUCCESS 时推送 file_ready 事件（含下载链接）
+        """
+        # ---- 获取锁并注册任务 ----
+        ok, error_events = await self._try_start()
+        if not ok:
+            for evt in error_events:
+                yield evt
+            return
+
+        llm = build_llm()
+
+        try:
+            # ---- 加载或创建实例（断点续传） ----
+            self._inst = self._load_or_create_inst()
+
+            start_state = self._inst.status or "INIT"
+            if start_state not in STATE_ORDER:
+                start_state = "INIT"
+
+            start_idx = STATE_ORDER.index(start_state)
+            logger.info(f"PPT Builder 启动: conv={self.conversation_id}, 起始状态={start_state}")
+
+            # ---- 状态机主循环 ----
+            for i in range(start_idx, len(STATE_ORDER)):
+                state = STATE_ORDER[i]
+
+                # SUCCESS 状态：PPT 已生成，推送下载链接
+                if state == "SUCCESS":
+                    schema = json.loads(self._inst.ppt_schema or "{}")
+                    title = schema.get("title", "output")
+                    download_path = f"/agent/pptx/download?conversationId={self.conversation_id}"
+                    yield make_event("text",
+                                     content=f"\n\nPPT已生成：[点击下载 {title}.pptx]({download_path})")
+                    yield make_event("file_ready",
+                                     url=self._inst.file_url or "",
+                                     fileName=f"{title}.pptx",
+                                     message="PPT已生成，点击下载")
+                    break
+
+                if self.cancel_event.is_set():
+                    raise AgentStopped
+
+                # 根据状态查找对应的 handler
+                handler = STATE_HANDLERS.get(state)
+                if not handler:
+                    self._save_inst("FAILED", error_msg=f"未知状态: {state}")
+                    yield make_event("error", message=f"未知状态: {state}")
+                    break
+
+                # 执行当前状态的 handler
+                try:
+                    async for event in handler(self, llm):
+                        yield event
+                    # handler 内部已通过 _save_inst 持久化，无需额外操作
+                except AgentStopped:
+                    raise
+                except Exception as e:
+                    logger.error(f"PPT状态 {state} 异常: {e}")
+                    self._save_inst("FAILED", error_msg=str(e))
+                    yield make_event("error", message=f"PPT生成失败({state}): {e}")
+                    break
+
+        except AgentStopped:
+            yield make_sse(json.dumps({"type": "error", "content": "用户已停止"}, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"PPT Builder异常: {e}")
+            yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
+        finally:
+            await self._cleanup()
+
+
+# =============================================================================
+# 状态处理器 — 每个状态对应一个 async generator 函数
+# =============================================================================
+
+async def _handle_init(agent: PptBuilderAgent, llm):
+    """INIT → SCHEMA：分析用户需求，生成 PPT 元信息（标题/页数/风格）。"""
+    yield make_event("thinking", content="正在分析PPT需求...")
 
     response = await llm.ainvoke([
-        ("system", INIT_PROMPT.format(query=inst.query)),
+        ("system", INIT_PROMPT.format(query=agent.query)),
     ])
     text = response.content if hasattr(response, "content") else str(response)
     data = _parse_json(text) or {}
 
-    inst.requirement = data.get("requirement", inst.query)
-    inst.template_code = data.get("style", "auto")
-    inst.ppt_schema = json.dumps(data, ensure_ascii=False)
-    inst.status = "SCHEMA"
-    _save_inst(inst)
+    agent._inst.requirement = data.get("requirement", agent.query)
+    agent._inst.template_code = data.get("style", "auto")
+    agent._inst.ppt_schema = json.dumps(data, ensure_ascii=False)
+    agent._save_inst("SCHEMA")   # 持久化 → 断点续传
 
     title = data.get("title", "")
     page_count = data.get("pageCount", 8)
     style = data.get("style", "auto")
-    yield _make_event("thinking",
-                      content=f"需求分析完成：主题「{title}」，{page_count}页，风格：{style}")
+    yield make_event("thinking",
+                     content=f"需求分析完成：主题「{title}」，{page_count}页，风格：{style}")
 
 
-async def _handle_schema(inst: AiPptInst, llm, cancel_event: asyncio.Event):
-    yield _make_event("thinking", content="正在规划PPT结构...")
+async def _handle_schema(agent: PptBuilderAgent, llm):
+    """SCHEMA → OUTLINE：规划每页的页面类型（COVER/CATALOG/CONTENT/COMPARE/END）。"""
+    yield make_event("thinking", content="正在规划PPT结构...")
 
     try:
-        init_data = json.loads(inst.ppt_schema or "{}")
+        init_data = json.loads(agent._inst.ppt_schema or "{}")
     except json.JSONDecodeError:
         init_data = {}
-    title = init_data.get("title", inst.query[:15])
+    title = init_data.get("title", agent.query[:15])
     page_count = init_data.get("pageCount", 8)
     style = init_data.get("style", "auto")
 
     response = await llm.ainvoke([
         ("system", SCHEMA_PROMPT.format(
-            title=title, requirement=inst.requirement,
+            title=title, requirement=agent._inst.requirement,
             page_count=page_count, style=style)),
     ])
     text = response.content if hasattr(response, "content") else str(response)
@@ -490,22 +618,22 @@ async def _handle_schema(inst: AiPptInst, llm, cancel_event: asyncio.Event):
     slides = data.get("slides", [])
 
     schema_data = {"title": title, "style": style, "slides": slides}
-    inst.ppt_schema = json.dumps(schema_data, ensure_ascii=False)
-    inst.status = "OUTLINE"
-    _save_inst(inst)
+    agent._inst.ppt_schema = json.dumps(schema_data, ensure_ascii=False)
+    agent._save_inst("OUTLINE")
 
-    yield _make_event("thinking",
-                      content=f"PPT结构规划完成，共 {len(slides)} 页")
+    yield make_event("thinking",
+                     content=f"PPT结构规划完成，共 {len(slides)} 页")
 
 
-async def _handle_outline(inst: AiPptInst, llm, cancel_event: asyncio.Event):
-    yield _make_event("thinking", content="正在生成详细大纲...")
+async def _handle_outline(agent: PptBuilderAgent, llm):
+    """OUTLINE → CONTENT：为每页生成详细大纲要点和配图搜索关键词。"""
+    yield make_event("thinking", content="正在生成详细大纲...")
 
-    schema_json = inst.ppt_schema or "{}"
+    schema_json = agent._inst.ppt_schema or "{}"
     try:
         schema_data = json.loads(schema_json)
     except json.JSONDecodeError:
-        schema_data = {"title": inst.query, "slides": []}
+        schema_data = {"title": agent.query, "slides": []}
 
     response = await llm.ainvoke([
         ("system", OUTLINE_PROMPT.format(
@@ -516,21 +644,27 @@ async def _handle_outline(inst: AiPptInst, llm, cancel_event: asyncio.Event):
     data = _parse_json(text) or {"slides": []}
     outline_slides = data.get("slides", [])
 
-    inst.outline = json.dumps(outline_slides, ensure_ascii=False)
-    inst.status = "CONTENT"
-    _save_inst(inst)
+    agent._inst.outline = json.dumps(outline_slides, ensure_ascii=False)
+    agent._save_inst("CONTENT")
 
-    yield _make_event("thinking",
-                      content=f"大纲生成完成，共 {len(outline_slides)} 页")
+    yield make_event("thinking",
+                     content=f"大纲生成完成，共 {len(outline_slides)} 页")
 
 
-async def _handle_content(inst: AiPptInst, llm, cancel_event: asyncio.Event):
+async def _handle_content(agent: PptBuilderAgent, llm):
+    """CONTENT → RENDER：逐页生成详细内容 + Tavily 搜索配图，推送每页进度。
+
+    这是最耗时的阶段，每页需要：
+    1. LLM 生成内容（bullets/subtitle/notes）
+    2. Tavily 搜索配图（仅 CONTENT 类型页面）
+    3. 下载图片并保存到本地临时目录
+    """
     try:
-        schema_data = json.loads(inst.ppt_schema or "{}")
+        schema_data = json.loads(agent._inst.ppt_schema or "{}")
     except json.JSONDecodeError:
-        schema_data = {"title": inst.query, "slides": []}
+        schema_data = {"title": agent.query, "slides": []}
     try:
-        outline_slides = json.loads(inst.outline or "[]")
+        outline_slides = json.loads(agent._inst.outline or "[]")
     except json.JSONDecodeError:
         outline_slides = []
 
@@ -538,20 +672,22 @@ async def _handle_content(inst: AiPptInst, llm, cancel_event: asyncio.Event):
     schema_slides = schema_data.get("slides", [])
     total = len(schema_slides)
 
-    yield _make_event("thinking", content=f"正在填充幻灯片内容，共 {total} 页...")
+    yield make_event("thinking", content=f"正在填充幻灯片内容，共 {total} 页...")
 
     full_slides: list[dict] = []
     for i, schema_slide in enumerate(schema_slides):
-        if cancel_event.is_set():
-            raise _AgentStopped
+        if agent.cancel_event.is_set():
+            raise AgentStopped
 
         slide_index = schema_slide.get("index", i + 1)
         page_type = schema_slide.get("pageType", "CONTENT")
         slide_title = schema_slide.get("title", "")
 
-        yield _make_event("thinking",
-                          content=f"[{i + 1}/{total}] 生成中：{slide_title}")
+        # 推送每页生成进度
+        yield make_event("thinking",
+                         content=f"[{i + 1}/{total}] 生成中：{slide_title}")
 
+        # 匹配大纲中对应页的数据
         outline_match = next(
             (o for o in outline_slides if o.get("index") == slide_index), {})
         key_points = outline_match.get("keyPoints", [])
@@ -564,6 +700,7 @@ async def _handle_content(inst: AiPptInst, llm, cancel_event: asyncio.Event):
             "description": schema_slide.get("description", ""),
         }
 
+        # CONTENT/COMPARE 页：调用 LLM 生成详细内容
         if page_type in ("CONTENT", "COMPARE"):
             response = await llm.ainvoke([
                 ("system", CONTENT_PROMPT.format(
@@ -592,6 +729,7 @@ async def _handle_content(inst: AiPptInst, llm, cancel_event: asyncio.Event):
             slide_data["title"] = "谢谢观看"
             slide_data["description"] = theme
 
+        # 搜索配图（仅 CONTENT 页）
         if image_kw and page_type in ("CONTENT",):
             images = await _search_images(image_kw, max_count=1)
             if images:
@@ -606,36 +744,40 @@ async def _handle_content(inst: AiPptInst, llm, cancel_event: asyncio.Event):
 
         full_slides.append(slide_data)
 
-        yield _make_event("thinking",
-                          content=f"[{i + 1}/{total}] 已完成：{slide_title}")
+        yield make_event("thinking",
+                         content=f"[{i + 1}/{total}] 已完成：{slide_title}")
 
-    inst.ppt_schema = json.dumps({
-        "title": theme,
-        "style": schema_data.get("style", "auto"),
-        "slides": schema_slides,
-    }, ensure_ascii=False)
-    inst.outline = json.dumps(full_slides, ensure_ascii=False)
-    inst.status = "RENDER"
-    _save_inst(inst)
+    # 持久化完整内容数据 → 断点续传
+    agent._save_inst("RENDER",
+                     ppt_schema=json.dumps({
+                         "title": theme,
+                         "style": schema_data.get("style", "auto"),
+                         "slides": schema_slides,
+                     }, ensure_ascii=False),
+                     outline=json.dumps(full_slides, ensure_ascii=False))
 
-    yield _make_event("thinking",
-                      content=f"内容填充完成，共 {len(full_slides)} 页")
+    yield make_event("thinking",
+                     content=f"内容填充完成，共 {len(full_slides)} 页")
 
 
-async def _handle_render(inst: AiPptInst, llm, cancel_event: asyncio.Event):
-    yield _make_event("thinking", content="正在渲染PPT文件...")
+async def _handle_render(agent: PptBuilderAgent, llm):
+    """RENDER → SUCCESS：调用 python-pptx 渲染 PPTX 文件，上传到 MinIO/本地。"""
+    yield make_event("thinking", content="正在渲染PPT文件...")
 
-    full_slides = json.loads(inst.outline or "[]")
-    ppt_schema = json.loads(inst.ppt_schema or "{}")
-    title = ppt_schema.get("title", inst.query)
+    full_slides = json.loads(agent._inst.outline or "[]")
+    ppt_schema = json.loads(agent._inst.ppt_schema or "{}")
+    title = ppt_schema.get("title", agent.query)
 
+    # 生成 PPTX 文件
     output_dir = Path(settings.upload_dir) / "pptx"
     output_dir.mkdir(parents=True, exist_ok=True)
     file_name = f"{uuid.uuid4().hex[:12]}.pptx"
     output_path = output_dir / file_name
 
+    # 同步渲染在线程池中执行，避免阻塞事件循环
     await asyncio.to_thread(render_pptx, full_slides, title, str(output_path))
 
+    # 清理临时图片文件
     for s in full_slides:
         img_path = s.get("_image_path", "")
         if img_path and os.path.exists(img_path):
@@ -644,6 +786,7 @@ async def _handle_render(inst: AiPptInst, llm, cancel_event: asyncio.Event):
             except OSError:
                 pass
 
+    # 上传到 MinIO（优先）或本地路径
     from minio import Minio
     from minio.error import S3Error
 
@@ -665,13 +808,12 @@ async def _handle_render(inst: AiPptInst, llm, cancel_event: asyncio.Event):
     if not file_url:
         file_url = f"local://{output_path}"
 
-    inst.file_url = file_url
-    inst.status = "SUCCESS"
-    _save_inst(inst)
+    agent._save_inst("SUCCESS", file_url=file_url)
 
-    yield _make_event("thinking", content="PPT文件渲染完成")
+    yield make_event("thinking", content="PPT文件渲染完成")
 
 
+# 状态 → handler 映射表
 STATE_HANDLERS = {
     "INIT": _handle_init,
     "SCHEMA": _handle_schema,
@@ -679,64 +821,3 @@ STATE_HANDLERS = {
     "CONTENT": _handle_content,
     "RENDER": _handle_render,
 }
-
-
-# ---- main stream ----
-
-async def ppt_builder_stream(conversation_id: str, query: str, cancel_event: asyncio.Event):
-    llm = build_llm()
-
-    try:
-        inst = _load_or_create_inst(conversation_id, query)
-
-        start_state = inst.status or "INIT"
-        if start_state not in STATE_ORDER:
-            start_state = "INIT"
-
-        start_idx = STATE_ORDER.index(start_state)
-        logger.info(f"PPT Builder 启动: conv={conversation_id}, 起始状态={start_state}")
-
-        for i in range(start_idx, len(STATE_ORDER)):
-            state = STATE_ORDER[i]
-            if state == "SUCCESS":
-                schema = json.loads(inst.ppt_schema or "{}")
-                title = schema.get("title", "output")
-                download_path = f"/agent/pptx/download?conversationId={conversation_id}"
-                yield _make_event("text",
-                                  content=f"\n\nPPT已生成：[点击下载 {title}.pptx]({download_path})")
-                yield _make_event("file_ready",
-                                  url=inst.file_url or "",
-                                  fileName=f"{title}.pptx",
-                                  message="PPT已生成，点击下载")
-                break
-
-            if cancel_event.is_set():
-                raise _AgentStopped
-
-            handler = STATE_HANDLERS.get(state)
-            if not handler:
-                inst.status = "FAILED"
-                inst.error_msg = f"未知状态: {state}"
-                _save_inst(inst)
-                yield _make_event("error", message=inst.error_msg)
-                break
-
-            try:
-                async for event in handler(inst, llm, cancel_event):
-                    yield event
-                inst = PptInstRepo().find_by_conversation_id(conversation_id) or inst
-            except _AgentStopped:
-                raise
-            except Exception as e:
-                logger.error(f"PPT状态 {state} 异常: {e}")
-                inst.status = "FAILED"
-                inst.error_msg = str(e)
-                _save_inst(inst)
-                yield _make_event("error", message=f"PPT生成失败({state}): {e}")
-                break
-
-    except _AgentStopped:
-        yield _make_sse(json.dumps({"type": "error", "content": "用户已停止"}, ensure_ascii=False))
-    except Exception as e:
-        logger.error(f"PPT Builder异常: {e}")
-        yield _make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))

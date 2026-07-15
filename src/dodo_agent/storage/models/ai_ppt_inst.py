@@ -35,3 +35,14 @@ class PptInstRepo(BaseRepository[AiPptInst]):
 
     def find_by_conversation_id(self, conversation_id: str) -> AiPptInst | None:
         return self.find_one(AiPptInst.conversation_id == conversation_id)
+
+    def update_status(self, inst: AiPptInst, status: str, **fields):
+        inst.status = status
+        inst.update_time = datetime.now()
+        for k, v in fields.items():
+            setattr(inst, k, v)
+        self._s.merge(inst)
+        self._s.flush()
+        if self._own_session:
+            self._s.commit()
+        return inst
