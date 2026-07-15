@@ -34,39 +34,3 @@ dev = [
 
 [tool.ruff]
 target-version = "py311"
-
-[tool.ruff.lint]
-select = [
-    "E",      # pycodestyle errors
-    "F",      # pyflakes
-    "W",      # pycodestyle warnings
-    "B",      # flake8-bugbear
-    "SIM",    # flake8-simplify
-    "TCH",    # flake8-type-checking-imports
-    "PIE",    # flake8-pie
-]
-ignore = ["E501"]  # line too long
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-skip-magic-trailing-comma = false
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-pythonpath = ["."]
-
-[tool.mypy]
-python_version = "3.11"
-ignore_missing_imports = true
-disallow_untyped_defs = false
-check_untyped_defs = true
-warn_return_any = false
-warn_unused_ignores = false
-
-[tool.pyright]
-pythonVersion = "3.11"
-typeCheckingMode = "basic"
-reportMissingImports = false
-reportMissingTypeStubs = false
