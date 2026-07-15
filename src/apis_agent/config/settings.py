@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     deep_research_max_iterations: int = 3
     deep_research_max_sub_tasks: int = 6
 
+    # Langfuse 追踪配置（留空则禁用）
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = ""
+
     # 上下文压缩配置
     compression_enabled: bool = True
     compression_layer_1_keep_recent_rounds: int = 2

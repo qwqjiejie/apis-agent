@@ -509,6 +509,7 @@ class PptBuilderAgent(BaseAgent):
             return
 
         llm = build_llm()
+        self._build_trace_config("ppt")
 
         try:
             # ---- 加载或创建实例（断点续传） ----

@@ -240,6 +240,7 @@ class DeepResearchAgent(BaseAgent):
             return
 
         llm = build_llm()
+        trace_config = self._build_trace_config("deep")
         all_results: list[TaskResult] = []
         # 信号量控制子任务并发上限
         semaphore = asyncio.Semaphore(get_settings().deep_research_max_concurrency)
@@ -292,7 +293,7 @@ class DeepResearchAgent(BaseAgent):
                     prev_ctx = _build_previous_context(all_results + round_results, order)
 
                     async for event in self._execute_order_group(
-                        tasks, llm, prev_ctx, semaphore, round_results,
+                        tasks, llm, prev_ctx, semaphore, round_results, trace_config,
                     ):
                         yield event
 
@@ -496,6 +497,7 @@ class DeepResearchAgent(BaseAgent):
     async def _run_sub_task(
         self, task: ResearchTask, llm, previous_context: str,
         event_queue: asyncio.Queue, semaphore: asyncio.Semaphore,
+        trace_config: dict,
     ):
         """执行单个子研究任务。
 
@@ -528,7 +530,7 @@ class DeepResearchAgent(BaseAgent):
             references: list[dict] = []
 
             try:
-                async for chunk in agent.astream_events(inputs, version="v2"):
+                async for chunk in agent.astream_events(inputs, version="v2", config=trace_config):
                     if self.cancel_event.is_set():
                         break
 
@@ -608,6 +610,7 @@ class DeepResearchAgent(BaseAgent):
     async def _execute_order_group(
         self, tasks: list[ResearchTask], llm, previous_context: str,
         semaphore: asyncio.Semaphore, results_out: list[TaskResult],
+        trace_config: dict,
     ):
         """并行执行同一 order 的所有子任务。
 
@@ -620,7 +623,7 @@ class DeepResearchAgent(BaseAgent):
         # 并行启动所有子任务（Semaphore 控制实际并发数）
         for t in tasks:
             asyncio.create_task(self._run_sub_task(
-                t, llm, previous_context, event_queue, semaphore,
+                t, llm, previous_context, event_queue, semaphore, trace_config,
             ))
 
         # 收集事件直到所有子任务完成

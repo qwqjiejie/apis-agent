@@ -8,7 +8,7 @@ from src.apis_agent.config.settings import get_settings
 
 logging.basicConfig(
     level=get_settings().log_level.upper(),
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    format="%(asctime)s [%(name)s] [%(trace_id)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
 
@@ -42,6 +42,13 @@ def _check_infrastructure():
 
 def main():
     _check_infrastructure()
+
+    # 预热 Langfuse 连接（若未配置则静默跳过）
+    from src.apis_agent.common.langfuse_client import get_langfuse
+    lf = get_langfuse()
+    if lf is not None:
+        logger.info("Langfuse 追踪已启用")
+
     uvicorn.run(
         "src.apis_agent.api.main:app",
         host=get_settings().server_host,

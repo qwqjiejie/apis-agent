@@ -11,6 +11,7 @@ from src.apis_agent.api.routes.session import router as session_router
 from src.apis_agent.api.routes.file import router as file_router
 from src.apis_agent.common.exceptions import ApisAgentError, InfrastructureError, ValidationError
 from src.apis_agent.common.logger import logger
+from src.apis_agent.common.trace_context import generate_trace_id, set_trace_context
 
 app = FastAPI(title="APIs Agent")
 
@@ -24,13 +25,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- HTTP 请求日志 ----
+# ---- HTTP 请求日志 + 追踪注入 ----
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    trace_id = request.headers.get("X-Trace-Id", "") or generate_trace_id()
+    session_id = request.headers.get("X-Session-Id", "")
+    set_trace_context(trace_id=trace_id, session_id=session_id)
+
     url = unquote(str(request.url))
     logger.info(f"{request.method} {url}")
+
     response = await call_next(request)
+    response.headers["X-Trace-Id"] = trace_id
     return response
 
 # ---- 全局异常处理 — 参考 Java 版 BaseResult 统一响应格式 ----

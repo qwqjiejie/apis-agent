@@ -4,6 +4,8 @@ import time
 from abc import ABC, abstractmethod
 
 from src.apis_agent.common.llm import build_llm
+from src.apis_agent.common.langfuse_client import get_langfuse_callback
+from src.apis_agent.common.trace_context import set_trace_context
 from src.apis_agent.service.file_service import file_service
 from src.apis_agent.service.rag_service import build_context
 from src.apis_agent.service.session_service import store
@@ -31,7 +33,7 @@ def _build_history_messages(history: list[dict]) -> list:
 
 
 async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event,
-                       side_queue: asyncio.Queue | None = None):
+                       side_queue: asyncio.Queue | None = None, config: dict | None = None):
     """将 Agent 流式执行封装到独立 Task 中，通过 asyncio.Queue 解耦。
 
     核心设计：Agent 在独立 Task 中执行 astream_events，主循环同时监听
@@ -40,12 +42,15 @@ async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event,
 
     side_queue 用于带外事件（如 shell 命令确认请求），以 {"_side_event": data}
     格式 yield 给调用方处理。
+
+    config 透传给 agent.astream_events()，用于注入 callbacks（如 Langfuse）。
     """
     chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+    cfg = config or {}
 
     async def run_agent():
         try:
-            async for chunk in agent.astream_events(inputs, version="v2"):
+            async for chunk in agent.astream_events(inputs, version="v2", config=cfg):
                 await chunk_queue.put(("chunk", chunk))
             await chunk_queue.put(("done", None))
         except asyncio.CancelledError:
@@ -250,6 +255,14 @@ class BaseAgent(ABC):
                 pass
         self._running_tasks.pop(self.conversation_id, None)
         await release_lock(self.conversation_id)
+
+    def _build_trace_config(self, agent_type: str) -> dict:
+        """构建包含 Langfuse callback 的 config，注入 trace 上下文到 contextvars。"""
+        set_trace_context(session_id=self.conversation_id, agent_type=agent_type)
+        lf_handler = get_langfuse_callback()
+        if lf_handler is None:
+            return {}
+        return {"callbacks": [lf_handler]}
 
     # =========================================================================
     # 抽象方法 — 子类必须实现

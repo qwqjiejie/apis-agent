@@ -134,9 +134,10 @@ class ChatAgent(BaseAgent):
             messages = self._load_messages()
             agent = self._build_agent()
             inputs = {"messages": messages}
+            trace_config = self._build_trace_config(self.agent_type)
 
             # ---- 第三步：流式执行 + 实时解析 ----
-            async for chunk in _process_chunks(agent, inputs, self.cancel_event, side_queue=shell_queue):
+            async for chunk in _process_chunks(agent, inputs, self.cancel_event, side_queue=shell_queue, config=trace_config):
                 # 处理 agent_task 内部异常
                 if isinstance(chunk, dict) and chunk.get("_error"):
                     yield make_sse(json.dumps({"type": "error", "content": chunk["_error"]}, ensure_ascii=False))

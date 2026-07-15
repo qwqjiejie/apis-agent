@@ -1,11 +1,13 @@
 import logging
 
+from src.apis_agent.common.langfuse_client import observe
 from src.apis_agent.service.embedding_service import embed_query, embedding_available
 from src.apis_agent.storage.vector_store import vector_store
 
 logger = logging.getLogger("apis")
 
 
+@observe(name="rag.retrieve")
 def retrieve(file_id: str, query: str, top_k: int = 5) -> list[dict]:
     if not embedding_available() or not vector_store.ready:
         return []
@@ -16,6 +18,7 @@ def retrieve(file_id: str, query: str, top_k: int = 5) -> list[dict]:
     return [r for r in results if r.get("file_id") == file_id]
 
 
+@observe(name="rag.build_context")
 def build_context(query: str, file_id: str, full_text: str, top_k: int = 5) -> str:
     parts = []
 
