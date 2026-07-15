@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     minio_secret_key: str = ""  # MinIO 密钥
     minio_bucket: str = "dodo"  # MinIO 存储桶名称
     upload_dir: str = "uploads"  # 本地文件上传目录
+    max_upload_size_mb: int = 20  # 文件上传大小上限（MB）
 
     # Milvus 配置
     milvus_host: str = ""  # Milvus 向量数据库地址

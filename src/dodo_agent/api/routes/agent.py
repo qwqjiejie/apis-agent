@@ -2,13 +2,14 @@ import json
 import os
 
 from fastapi import APIRouter, Query
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
 from src.dodo_agent.agent.base_agent import BaseAgent
 from src.dodo_agent.agent.chat_agent import ChatAgent
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.redis import publish_stop
+from src.dodo_agent.common.response import ok, error
 from src.dodo_agent.config.settings import settings
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -67,14 +68,14 @@ async def agent_pptx_download(conversationId: str = Query(...)):
     repo = PptInstRepo()
     inst = repo.find_by_conversation_id(conversationId)
     if not inst or not inst.file_url:
-        return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "PPT文件不存在"})
+        return error(404, "PPT文件不存在")
 
     file_url = inst.file_url
 
     if file_url.startswith("local://"):
         local_path = file_url[len("local://"):]
         if not os.path.exists(local_path):
-            return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "文件已被清理"})
+            return error(404, "文件已被清理")
         return FileResponse(local_path, filename=os.path.basename(local_path),
                             media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
@@ -97,9 +98,9 @@ async def agent_pptx_download(conversationId: str = Query(...)):
                 headers={"Content-Disposition": f"attachment; filename={obj_name.rsplit('/', 1)[-1]}"},
             )
         except S3Error:
-            return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "文件下载失败"})
+            return error(404, "文件下载失败")
 
-    return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "无效的文件路径"})
+    return error(404, "无效的文件路径")
 
 
 @router.get("/deep/stream")
@@ -139,5 +140,5 @@ async def agent_stop(conversationId: str = Query(...)):
         event.set()
     await publish_stop(conversationId)
     if event:
-        return JSONResponse({"code": 200, "data": None, "message": "已发送停止信号"})
-    return JSONResponse({"code": 200, "data": None, "message": "无运行中的任务"})
+        return ok(None, message="已发送停止信号")
+    return ok(None, message="无运行中的任务")

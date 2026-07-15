@@ -11,6 +11,8 @@ from minio.error import S3Error
 
 from src.dodo_agent.service.embedding_service import embed_texts, embedding_available
 from src.dodo_agent.config.settings import settings
+from src.dodo_agent.common.exceptions import FileTooLargeError, UnsupportedFileTypeError
+from src.dodo_agent.common.logger import logger
 from src.dodo_agent.storage.db import new_session
 from src.dodo_agent.storage.models.ai_file_info import AiFileInfo, FileInfoRepo
 from src.dodo_agent.storage.vector_store import vector_store
@@ -56,14 +58,15 @@ class FileService:
         original_name = file.filename or "unknown"
         file_type = get_file_type(original_name)
         if not is_supported(original_name):
-            return {"error": f"不支持的文件类型: {file_type}"}
-
-        local_path = ""
-        minio_path = ""
-        file_size = 0
+            raise UnsupportedFileTypeError(file_type)
 
         content = file.file.read()
         file_size = len(content)
+        if file_size > settings.max_upload_size_mb * 1024 * 1024:
+            raise FileTooLargeError(settings.max_upload_size_mb)
+
+        local_path = ""
+        minio_path = ""
 
         local_path = self._save_local(file_id, original_name, content)
         if self._minio:

@@ -154,16 +154,15 @@ class ChatAgent(BaseAgent):
                     yield make_event("tool_end", toolName=name, toolCallId=chunk.get("run_id", ""))
                     output = chunk.get("data", {}).get("output", "")
                     if isinstance(output, str) and "SOURCES:" in output:
-                        import ast
                         try:
                             src = output.split("SOURCES: ", 1)[1]
                             if "\n\nDETAILS:" in src:
                                 src = src.split("\n\nDETAILS:")[0]
-                            refs = ast.literal_eval(src)
-                            references.extend(refs)
-                            if refs:
+                            refs = json.loads(src)
+                            if isinstance(refs, list):
+                                references.extend(refs)
                                 yield make_event("reference", content=refs)
-                        except Exception:
+                        except (json.JSONDecodeError, IndexError):
                             pass
 
                 # --- LLM 流式输出：双轨解析 ---

@@ -2,10 +2,9 @@ import time
 import uuid
 
 from fastapi import APIRouter, Query
-from fastapi.responses import JSONResponse
 
 from src.dodo_agent.service.session_service import store
-from src.dodo_agent.common.response import ok, ok_paged
+from src.dodo_agent.common.response import ok, ok_paged, error
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -26,7 +25,7 @@ async def list_sessions(pageNum: int = Query(default=1), pageSize: int = Query(d
 async def get_session(conversation_id: str):
     session = store.get_session(conversation_id)
     if not session:
-        return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "会话不存在"})
+        return error(404, "会话不存在")
     return ok(session)
 
 
@@ -34,5 +33,5 @@ async def get_session(conversation_id: str):
 async def delete_session(conversation_id: str):
     ok_deleted = store.delete_session(conversation_id)
     if not ok_deleted:
-        return JSONResponse(status_code=404, content={"code": 404, "data": None, "message": "会话不存在"})
-    return JSONResponse({"code": 200, "data": None, "message": "success"})
+        return error(404, "会话不存在")
+    return ok(None)
