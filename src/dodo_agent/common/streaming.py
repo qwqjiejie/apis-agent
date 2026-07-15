@@ -18,6 +18,7 @@ class StreamEventType(StrEnum):
     PLAN = "plan"
     CRITIQUE = "critique"
     FILE_READY = "file_ready"
+    CONFIRM_SHELL = "confirm_shell"
 
 
 class AgentStopped(Exception):

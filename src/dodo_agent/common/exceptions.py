@@ -75,6 +75,14 @@ class UnsupportedFileTypeError(ValidationError):
         super().__init__(f"不支持的文件类型: {file_type}")
 
 
+class InvalidMimeTypeError(ValidationError):
+    def __init__(self, expected: str, actual: str = ""):
+        msg = f"文件 MIME 类型不匹配，期望: {expected}"
+        if actual:
+            msg += f"，实际: {actual}"
+        super().__init__(msg)
+
+
 class AgentBusyError(ValidationError):
     def __init__(self):
         super().__init__("当前会话有任务正在执行中，请稍后再试")

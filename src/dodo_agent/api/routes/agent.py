@@ -5,6 +5,8 @@ from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
+from fastapi import Body
+
 from src.dodo_agent.agent.base_agent import BaseAgent
 from src.dodo_agent.agent.chat_agent import ChatAgent
 from src.dodo_agent.common.exceptions import DodoAgentError, QueryTooLongError
@@ -13,6 +15,7 @@ from src.dodo_agent.common.redis import publish_stop
 from src.dodo_agent.common.response import ok, error
 from src.dodo_agent.common.streaming import make_sse
 from src.dodo_agent.config.settings import get_settings
+from src.dodo_agent.tool.bash_tool import resolve_confirmation
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -158,3 +161,11 @@ async def agent_stop(conversationId: str = Query(...)):
     if event:
         return ok(None, message="已发送停止信号")
     return ok(None, message="无运行中的任务")
+
+
+@router.post("/shell/confirm")
+async def shell_confirm(confirmId: str = Body(...), approved: bool = Body(...)):
+    ok_result = resolve_confirmation(confirmId, approved)
+    if not ok_result:
+        return error(404, "确认请求不存在或已过期")
+    return ok(None, message="已确认" if approved else "已拒绝")

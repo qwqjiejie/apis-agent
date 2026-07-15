@@ -9,6 +9,19 @@ SUPPORTED_TYPES = {
     "pdf", "doc", "docx", "txt", "png", "jpg", "jpeg", "gif", "bmp", "webp",
 }
 
+ALLOWED_MIME_TYPES = {
+    "pdf":  ["application/pdf"],
+    "doc":  ["application/msword"],
+    "docx": ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    "txt":  ["text/plain"],
+    "png":  ["image/png"],
+    "jpg":  ["image/jpeg"],
+    "jpeg": ["image/jpeg"],
+    "gif":  ["image/gif"],
+    "bmp":  ["image/bmp", "image/x-bmp"],
+    "webp": ["image/webp"],
+}
+
 
 def get_file_type(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
@@ -17,6 +30,19 @@ def get_file_type(filename: str) -> str:
 
 def is_supported(filename: str) -> bool:
     return get_file_type(filename) in SUPPORTED_TYPES
+
+
+def validate_mime_type(filename: str, content_type: str | None) -> tuple[bool, str]:
+    """验证文件的 MIME 类型是否与扩展名匹配。返回 (is_valid, expected_types_str)。"""
+    ext = get_file_type(filename)
+    allowed = ALLOWED_MIME_TYPES.get(ext, [])
+    if not allowed:
+        return False, ""
+    if not content_type:
+        return False, ", ".join(allowed)
+    if content_type not in allowed:
+        return False, ", ".join(allowed)
+    return True, ""
 
 
 def parse_file(file_path: str, filename: str) -> str | None:

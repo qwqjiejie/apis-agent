@@ -30,12 +30,16 @@ def _build_history_messages(history: list[dict]) -> list:
     return msgs
 
 
-async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event):
+async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event,
+                       side_queue: asyncio.Queue | None = None):
     """将 Agent 流式执行封装到独立 Task 中，通过 asyncio.Queue 解耦。
 
     核心设计：Agent 在独立 Task 中执行 astream_events，主循环同时监听
-    chunk 到达和 cancel_event，取消时能通过 CancelledError 传播到 langgraph 内部，
-    自动清理子任务。返回的 chunk 通过 yield 透传给调用方。
+    chunk 到达、cancel_event 和 side_queue，取消时能通过 CancelledError 传播
+    到 langgraph 内部，自动清理子任务。返回的 chunk 通过 yield 透传给调用方。
+
+    side_queue 用于带外事件（如 shell 命令确认请求），以 {"_side_event": data}
+    格式 yield 给调用方处理。
     """
     chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 
@@ -53,18 +57,26 @@ async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event):
 
     try:
         while True:
-            # 同时等待 chunk 到达和取消信号，谁先完成处理谁
             get_task = asyncio.create_task(chunk_queue.get())
             watch_task = asyncio.create_task(cancel_event.wait())
+            tasks = [get_task, watch_task]
+            side_task = None
+            if side_queue is not None:
+                side_task = asyncio.create_task(side_queue.get())
+                tasks.append(side_task)
 
-            done, pending = await asyncio.wait(
-                [get_task, watch_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            for t in pending:
+                t.cancel()
+
+            # side_queue 事件：yield 给调用方，继续循环
+            if side_task is not None and side_task in done:
+                yield {"_side_event": side_task.result()}
+                continue
 
             # 取消信号先到达：终止 agent_task，向上抛出 AgentStopped
             if watch_task in done:
-                get_task.cancel()
                 agent_task.cancel()
                 try:
                     await agent_task
@@ -72,7 +84,6 @@ async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event):
                     pass
                 raise AgentStopped
 
-            watch_task.cancel()
             msg_type, data = get_task.result()
 
             if msg_type == "done":

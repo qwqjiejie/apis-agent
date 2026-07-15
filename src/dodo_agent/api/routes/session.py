@@ -1,5 +1,4 @@
-import time
-import uuid
+import secrets
 
 from fastapi import APIRouter, Query
 
@@ -11,7 +10,8 @@ router = APIRouter(prefix="/session", tags=["session"])
 
 @router.post("")
 async def create_session():
-    cid = f"chat_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    session_token = secrets.token_urlsafe(24)
+    cid = f"sess_{session_token}"
     return ok({"conversationId": cid, "question": "新对话"})
 
 

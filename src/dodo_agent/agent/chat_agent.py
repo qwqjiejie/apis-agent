@@ -9,7 +9,7 @@ from src.dodo_agent.common.llm import build_llm
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.common.streaming import AgentStopped, make_event, make_sse
 from src.dodo_agent.common.tag_parser import StreamingTagParser
-from src.dodo_agent.tool.bash_tool import bash_tool
+from src.dodo_agent.tool.bash_tool import bash_tool, set_shell_side_queue
 from src.dodo_agent.tool.file_system_tools import read_file, write_file, edit_file, list_files, glob_files
 from src.dodo_agent.tool.grep_tool import grep_tool
 from src.dodo_agent.tool.skills_tool import load_skills
@@ -126,6 +126,8 @@ class ChatAgent(BaseAgent):
         tools_used: set[str] = set()        # 本轮使用的工具集合
         references: list[dict] = []         # 搜索参考来源
         first_token_sent = False            # 首 token 延迟标记
+        shell_queue: asyncio.Queue = asyncio.Queue()  # shell 确认事件队列
+        set_shell_side_queue(shell_queue)
 
         try:
             # ---- 第二步：加载上下文 ----
@@ -134,11 +136,17 @@ class ChatAgent(BaseAgent):
             inputs = {"messages": messages}
 
             # ---- 第三步：流式执行 + 实时解析 ----
-            async for chunk in _process_chunks(agent, inputs, self.cancel_event):
+            async for chunk in _process_chunks(agent, inputs, self.cancel_event, side_queue=shell_queue):
                 # 处理 agent_task 内部异常
                 if isinstance(chunk, dict) and chunk.get("_error"):
                     yield make_sse(json.dumps({"type": "error", "content": chunk["_error"]}, ensure_ascii=False))
                     return
+
+                # 处理 side_queue 事件（shell 命令确认请求）
+                if isinstance(chunk, dict) and chunk.get("_side_event"):
+                    side_data = chunk["_side_event"]
+                    yield make_sse(json.dumps(side_data, ensure_ascii=False))
+                    continue
 
                 kind = chunk["event"]
 
@@ -223,4 +231,5 @@ class ChatAgent(BaseAgent):
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
         finally:
             # ---- 第七步：清理资源 ----
+            set_shell_side_queue(None)
             await self._cleanup()

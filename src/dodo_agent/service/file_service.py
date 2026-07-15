@@ -11,12 +11,12 @@ from minio.error import S3Error
 
 from src.dodo_agent.service.embedding_service import embed_texts, embedding_available
 from src.dodo_agent.config.settings import get_settings
-from src.dodo_agent.common.exceptions import FileTooLargeError, UnsupportedFileTypeError
+from src.dodo_agent.common.exceptions import FileTooLargeError, UnsupportedFileTypeError, InvalidMimeTypeError
 from src.dodo_agent.common.logger import logger
 from src.dodo_agent.storage.db import new_session
 from src.dodo_agent.storage.models.ai_file_info import AiFileInfo, FileInfoRepo
 from src.dodo_agent.storage.vector_store import vector_store
-from src.dodo_agent.utils.file_parser import parse_file, get_file_type, is_supported
+from src.dodo_agent.utils.file_parser import parse_file, get_file_type, is_supported, validate_mime_type
 from src.dodo_agent.utils.text_splitter import split_text
 
 logger = logging.getLogger("dodo")
@@ -59,6 +59,10 @@ class FileService:
         file_type = get_file_type(original_name)
         if not is_supported(original_name):
             raise UnsupportedFileTypeError(file_type)
+
+        mime_valid, expected_mime = validate_mime_type(original_name, file.content_type)
+        if not mime_valid:
+            raise InvalidMimeTypeError(expected_mime, file.content_type or "")
 
         content = file.file.read()
         file_size = len(content)

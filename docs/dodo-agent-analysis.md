@@ -21,7 +21,7 @@
 
 | 编号 | 功能 | 状态 | 描述 |
 |------|------|------|------|
-| F-06 | 会话 CRUD | 已完成 | 分页查询会话列表、查询会话详情、删除会话（级联删除关联的 file_info 和 ppt_inst） |
+| F-06 | 会话 CRUD | 已完成 | 分页查询会话列表、查询会话详情、删除会话（级联删除关联的 file_info 和 ppt_inst）；会话 ID 使用 `secrets.token_urlsafe` 安全随机生成 |
 | F-07 | 对话历史持久化 | 已完成 | 用户问题和 AI 回答（含 thinking/工具调用/参考来源/推荐问题）存储到 MySQL |
 | F-08 | 跨会话记忆恢复 | 已完成 | 通过 ChatMemory 从数据库加载历史消息，支持上下文延续 |
 
@@ -29,7 +29,7 @@
 
 | 编号 | 功能 | 状态 | 描述 |
 |------|------|------|------|
-| F-09 | 文件上传 | 已完成 | 支持 PDF/DOC/DOCX/TXT/PNG/JPG，上传到 MinIO 对象存储。本地文件系统 + MinIO 双存储，上传时自动解析文本内容 |
+| F-09 | 文件上传 | 已完成 | 支持 PDF/DOC/DOCX/TXT/PNG/JPG，上传到 MinIO 对象存储。本地文件系统 + MinIO 双存储，上传时自动解析文本内容；校验 MIME 类型与扩展名一致性，拒绝不匹配的上传 |
 | F-10 | 文件解析 | 已完成 | 文本文件解析提取内容（PDFBox + POI）；大文件自动切分向量化（500 字符块 + 50 字符重叠）。PDF/DOCX/TXT 解析和向量化均已完成 |
 | F-11 | 图片识别 | 已完成 | 调用多模态模型 (vision_model 可配置) 识别图片内容，图片上传时自动调用多模态 API 生成文字描述，存入 extracted_text 参与 RAG 检索 |
 | F-12 | 文件 RAG 检索 | 已完成 | 查询压缩重写 -> 多查询扩展 -> Milvus 语义检索 -> 去重合并 |
@@ -66,7 +66,7 @@
 | 编号 | 功能 | 状态 | 描述 |
 |------|------|------|------|
 | F-25 | Tavily 搜索 | 已完成 | 通过 MCP 协议接入 Tavily 搜索引擎，自动解析搜索结果 |
-| F-26 | Bash 工具 | 已完成 | 持久化 Shell 会话，执行系统命令，支持超时和输出限制 |
+| F-26 | Bash 工具 | 已完成 | 持久化 Shell 会话，执行系统命令，支持超时和输出限制。读命令（ls/cat/grep等）默认放行，危险命令（rm/kill/pip install等）需用户手动确认 |
 | F-27 | 文件系统工具 | 已完成 | read_file / write_file / edit_file / list_files / glob_files |
 | F-28 | Grep 工具 | 已完成 | 正则表达式内容搜索，优先使用 ripgrep，回退到 Python 原生 |
 | F-29 | Skills 工具 | 已完成 | 从本地目录加载 SKILL.md，注册为可调用的工具 |
@@ -254,8 +254,8 @@ src/dodo_agent/
 │   ├── routes/
 │   │   ├── agent.py                     # Agent SSE 路由 (chat/file/pptx/deep/skills/stop)
 │   │   ├── file.py                      # 文件管理路由
-│   │   └── session.py                   # 会话管理路由
-│   ├── file_service.py                  # 文件服务 (上传/解析/MinIO)
+│   │   └── session.py                   # 会话管理路由 (安全随机 token)
+│   ├── file_service.py                  # 文件服务 (上传/解析/MinIO, MIME校验)
 │   ├── rag_service.py                   # RAG 检索服务
 │   ├── embedding_service.py             # 向量嵌入服务
 │   └── session.py                       # 会话存储 (MySQL + 内存降级)
@@ -273,7 +273,7 @@ src/dodo_agent/
 │       └── ai_ppt_inst.py               # PPT 实例模型
 ├── tool/                                # 工具层
 │   ├── tavily_search.py                 # Tavily 搜索
-│   ├── bash_tool.py                     # Shell 命令
+│   ├── bash_tool.py                     # Shell 命令 (读命令放行，危险命令需确认)
 │   ├── file_system_tools.py             # 文件系统工具
 │   ├── grep_tool.py                     # 代码搜索
 │   ├── file_parser.py                   # 文件解析 (PDF/Word)
@@ -302,6 +302,7 @@ src/dodo_agent/
 | GET | `/agent/deep/stream` | 深度研究 (SSE流式) |
 | GET | `/agent/skills/stream` | 技能助手 (SSE流式) |
 | GET | `/agent/stop` | 停止 Agent 执行 |
+| POST | `/agent/shell/confirm` | 确认/拒绝危险 Shell 命令 |
 | POST | `/file/upload` | 上传文件 |
 | GET | `/file/info/{fileId}` | 获取文件信息 |
 | GET | `/file/content/{fileId}` | 获取文件内容 |
@@ -319,6 +320,7 @@ src/dodo_agent/
 {"type":"text","content":"这是最终回答内容"}
 {"type":"reference","content":"[{\"title\":\"来源1\",\"url\":\"...\"}]","count":3}
 {"type":"recommend","content":"[\"相关问题1\",\"相关问题2\"]"}
+{"type":"confirm_shell","confirmId":"a1b2c3d4","command":"rm -rf /tmp/cache"}
 {"type":"error","content":"错误信息"}
 ```
 
@@ -376,6 +378,8 @@ PPT Builder 额外事件类型：
 7. **python-pptx 渲染**: LLM 决定布局，python-pptx 渲染 5 种页面类型，Tavily 搜索配图嵌入
 8. **并发控制**: Semaphore 控制深度研究的工具调用并发度
 9. **插件化工具**: MCP 协议实现工具热插拔，Skills 体系支持动态加载
+10. **Shell 安全确认**: Bash 工具区分读/写命令，危险命令（rm/kill/pip install 等）通过 SSE 推送确认请求，用户手动批准后执行
+11. **文件上传校验**: 上传时校验 MIME 类型与扩展名一致性，拒绝类型不匹配的文件
 
 ---
 
