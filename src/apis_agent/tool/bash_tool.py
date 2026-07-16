@@ -6,6 +6,8 @@ import uuid
 
 from langchain_core.tools import tool
 
+from src.apis_agent.tool.registry import register_tool
+
 logger = logging.getLogger("apis")
 
 TIMEOUT = 30
@@ -131,6 +133,7 @@ def get_pending_confirmations() -> list[dict]:
 # =============================================================================
 
 
+@register_tool
 @tool
 async def bash_tool(command: str) -> str:
     """执行 Shell 命令，返回 stdout + stderr。

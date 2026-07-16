@@ -12,7 +12,7 @@ from src.apis_agent.common.logger import logger
 from src.apis_agent.common.streaming import AgentStopped, make_event, make_sse
 from src.apis_agent.common.tag_parser import StreamingTagParser
 from src.apis_agent.config.settings import get_settings
-from src.apis_agent.tool.tavily_search import tavily_search
+from src.apis_agent.tool import TOOL_REGISTRY
 
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -518,7 +518,9 @@ class DeepResearchAgent(BaseAgent):
             ))
 
             # 为每个子任务创建独立的 ReAct Agent
-            agent = create_agent(llm, [tavily_search], system_prompt=SUB_TASK_PROMPT)
+            search_tool = TOOL_REGISTRY.get("tavily_search")
+            tools = [search_tool] if search_tool else []
+            agent = create_agent(llm, tools, system_prompt=SUB_TASK_PROMPT)
             query_text = task.query
             if previous_context:
                 # 注入前序研究上下文，实现跨 order 的知识传递

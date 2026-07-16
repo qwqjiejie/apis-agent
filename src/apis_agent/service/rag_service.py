@@ -1,6 +1,7 @@
 import logging
 
 from src.apis_agent.common.langfuse_client import observe
+from src.apis_agent.rag.retrieval_pipeline import build_context_enhanced
 from src.apis_agent.service.embedding_service import embed_query, embedding_available
 from src.apis_agent.storage.vector_store import vector_store
 
@@ -9,6 +10,7 @@ logger = logging.getLogger("apis")
 
 @observe(name="rag.retrieve")
 def retrieve(file_id: str, query: str, top_k: int = 5) -> list[dict]:
+    """简单单路检索（向后兼容）。新代码建议使用 build_context。"""
     if not embedding_available() or not vector_store.ready:
         return []
     q_vec = embed_query(query)
@@ -19,30 +21,6 @@ def retrieve(file_id: str, query: str, top_k: int = 5) -> list[dict]:
 
 
 @observe(name="rag.build_context")
-def build_context(query: str, file_id: str, full_text: str, top_k: int = 5) -> str:
-    parts = []
-
-    retrieved = retrieve(file_id, query, top_k)
-    if retrieved:
-        deduped = _dedup(retrieved)
-        parts.append("【相关段落】")
-        for i, r in enumerate(deduped, 1):
-            parts.append(f"[{i}] {r['text']}")
-
-    if full_text:
-        text_snippet = full_text[:4000]
-        parts.append("【文件全文摘要】")
-        parts.append(text_snippet)
-
-    return "\n\n".join(parts)
-
-
-def _dedup(results: list[dict]) -> list[dict]:
-    seen = set()
-    out = []
-    for r in results:
-        key = r["text"][:100]
-        if key not in seen:
-            seen.add(key)
-            out.append(r)
-    return out
+async def build_context(query: str, file_id: str, full_text: str, top_k: int = 5) -> str:
+    """构建 RAG 上下文。使用增强检索管线（查询重写 + 多路召回 + RRF + 动态裁剪）。"""
+    return await build_context_enhanced(query, file_id, full_text, top_k)

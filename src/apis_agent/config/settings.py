@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     deep_research_max_iterations: int = 3
     deep_research_max_sub_tasks: int = 6
 
+    # 限流配置
+    rate_limit_enabled: bool = True
+    rate_limit_user_per_min: int = 60
+    rate_limit_ip_per_min: int = 300
+    rate_limit_window_sec: int = 60
+
     # Langfuse 追踪配置（留空则禁用）
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""

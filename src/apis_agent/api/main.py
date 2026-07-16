@@ -1,4 +1,6 @@
 import os
+from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
@@ -6,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.apis_agent.api.middleware.rate_limit import RateLimitMiddleware
 from src.apis_agent.api.routes.agent import router as agent_router
 from src.apis_agent.api.routes.session import router as session_router
 from src.apis_agent.api.routes.file import router as file_router
@@ -13,7 +16,26 @@ from src.apis_agent.common.exceptions import ApisAgentError, InfrastructureError
 from src.apis_agent.common.logger import logger
 from src.apis_agent.common.trace_context import generate_trace_id, set_trace_context
 
-app = FastAPI(title="APIs Agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动工具热加载器
+    from src.apis_agent.harness.tool_hot_reloader import ToolHotReloader
+    from src.apis_agent.agent.chat_agent import invalidate_cached_agents
+
+    tools_dir = Path(__file__).resolve().parent.parent / "tool"
+    hot_reloader = ToolHotReloader(tools_dir, on_reload=invalidate_cached_agents)
+    app.state.tool_hot_reloader = hot_reloader
+
+    if tools_dir.is_dir():
+        await hot_reloader.start()
+
+    yield
+
+    await hot_reloader.stop()
+
+
+app = FastAPI(title="APIs Agent", lifespan=lifespan)
 
 # ---- CORS ----
 
@@ -24,6 +46,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---- 限流 ----
+
+app.add_middleware(RateLimitMiddleware)
 
 # ---- HTTP 请求日志 + 追踪注入 ----
 

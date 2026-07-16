@@ -9,11 +9,9 @@ from src.apis_agent.common.llm import build_llm
 from src.apis_agent.common.logger import logger
 from src.apis_agent.common.streaming import AgentStopped, make_event, make_sse
 from src.apis_agent.common.tag_parser import StreamingTagParser
-from src.apis_agent.tool.bash_tool import bash_tool, set_shell_side_queue
-from src.apis_agent.tool.file_system_tools import read_file, write_file, edit_file, list_files, glob_files
-from src.apis_agent.tool.grep_tool import grep_tool
+from src.apis_agent.tool import TOOL_REGISTRY
+from src.apis_agent.tool.bash_tool import set_shell_side_queue
 from src.apis_agent.tool.skills_tool import load_skills
-from src.apis_agent.tool.tavily_search import tavily_search
 
 # =============================================================================
 # System Prompts
@@ -51,35 +49,36 @@ _chat_agent = None       # 聊天 Agent 缓存（仅搜索工具）
 _skills_agent = None     # 技能 Agent 缓存（全套工具）
 
 
+def invalidate_cached_agents():
+    """热重载时清除缓存的 Agent，下次请求时自动重建。"""
+    global _chat_agent, _skills_agent
+    _chat_agent = None
+    _skills_agent = None
+    logger.info("Agent 缓存已失效，下次请求将使用新工具重建")
+
+
 def _build_react_agent():
-    """构建聊天 Agent — 仅携带 Tavily 搜索工具，使用 ReAct 模式。"""
+    """构建聊天 Agent — 仅携带 tavily_search 工具，使用 ReAct 模式。"""
     global _chat_agent
     if _chat_agent is None:
-        _chat_agent = create_agent(build_llm(), [tavily_search], system_prompt=CHAT_SYSTEM_PROMPT)
-        logger.info("Chat Agent 已缓存")
+        search_tool = TOOL_REGISTRY.get("tavily_search")
+        tools = [search_tool] if search_tool else []
+        _chat_agent = create_agent(build_llm(), tools, system_prompt=CHAT_SYSTEM_PROMPT)
+        logger.info(f"Chat Agent 已缓存 ({len(tools)} 工具)")
     return _chat_agent
 
 
 def _build_skills_agent():
-    """构建技能 Agent — 携带全套工具（搜索/文件系统/Bash/Grep/技能插件）。"""
+    """构建技能 Agent — 从 TOOL_REGISTRY 获取全部工具 + 动态加载技能插件。"""
     global _skills_agent
     if _skills_agent is None:
-        tools = [
-            tavily_search,
-            read_file,
-            write_file,
-            edit_file,
-            list_files,
-            glob_files,
-            grep_tool,
-            bash_tool,
-        ]
+        tools = list(TOOL_REGISTRY.values())
         skill_tools = load_skills()
         if skill_tools:
             logger.info(f"已加载 {len(skill_tools)} 个技能")
         tools.extend(skill_tools)
         _skills_agent = create_agent(build_llm(), tools, system_prompt=SKILLS_SYSTEM_PROMPT)
-        logger.info("Skills Agent 已缓存")
+        logger.info(f"Skills Agent 已缓存 ({len(tools)} 工具)")
     return _skills_agent
 
 
@@ -131,7 +130,7 @@ class ChatAgent(BaseAgent):
 
         try:
             # ---- 第二步：加载上下文 ----
-            messages = self._load_messages()
+            messages = await self._load_messages()
             agent = self._build_agent()
             inputs = {"messages": messages}
             trace_config = self._build_trace_config(self.agent_type)

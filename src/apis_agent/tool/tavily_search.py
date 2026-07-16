@@ -1,8 +1,10 @@
 from langchain.tools import tool
 from tavily import TavilyClient
 from src.apis_agent.config.settings import get_settings
+from src.apis_agent.tool.registry import register_tool
 
 
+@register_tool
 @tool
 def tavily_search(query: str) -> str:
     """通过 Tavily 搜索引擎搜索互联网信息，返回 JSON 格式的搜索结果，包含 title、url、content 字段。"""

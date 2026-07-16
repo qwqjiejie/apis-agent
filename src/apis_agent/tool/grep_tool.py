@@ -5,6 +5,8 @@ import subprocess
 
 from langchain_core.tools import tool
 
+from src.apis_agent.tool.registry import register_tool
+
 logger = logging.getLogger("apis")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -55,6 +57,7 @@ def _python_grep(pattern: str, path: str) -> str:
         return f"grep 失败: {e}"
 
 
+@register_tool
 @tool
 def grep_tool(pattern: str, path: str = ".") -> str:
     """在项目中搜索匹配正则表达式的内容。

@@ -180,14 +180,14 @@ class BaseAgent(ABC):
         )
         return True, []
 
-    def _load_messages(self) -> list:
+    async def _load_messages(self) -> list:
         """加载上下文消息：历史 → 压缩 → 文件上下文拼接。
 
         流程：
         1. 从 store 加载最近 N 轮对话历史
         2. Layer 1 压缩：旧轮次搜索结果 → 占位符，长回答截断
         3. 估算 token，超 75% 阈值时触发 Layer 2 后台 LLM 摘要
-        4. 如果有 fileId，拼接 RAG 检索结果
+        4. 如果有 fileId，异步 RAG 检索拼接文件内容
         """
         # 加载历史并转为消息列表
         history = store.load_history(self.conversation_id, limit=get_settings().max_history_rounds)
@@ -207,12 +207,12 @@ class BaseAgent(ABC):
             # 后台异步执行，不阻塞首 token
             asyncio.create_task(self._bg_compress(pre_messages))
 
-        # 文件上下文拼接
+        # 文件上下文拼接（异步 RAG 管线：查询重写 + 多路召回 + RRF + 动态裁剪）
         file_context = ""
         if self.file_id:
             content = file_service.get_content(self.file_id)
             if content and content.get("extractedText"):
-                ctx = build_context(self.query, self.file_id, content["extractedText"])
+                ctx = await build_context(self.query, self.file_id, content["extractedText"])
                 if ctx:
                     file_context = (
                         "\n\n【参考以下文件内容回答问题，优先基于文件内容作答，若文件内容不足以回答再结合搜索】\n\n" + ctx

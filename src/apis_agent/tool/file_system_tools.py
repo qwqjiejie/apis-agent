@@ -4,6 +4,8 @@ import os
 
 from langchain_core.tools import tool
 
+from src.apis_agent.tool.registry import register_tool
+
 logger = logging.getLogger("apis")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -16,6 +18,7 @@ def _safe_path(path: str) -> str:
     return p
 
 
+@register_tool
 @tool
 def read_file(path: str, offset: int = 0, limit: int = 500) -> str:
     """读取文件内容，可指定起始行和行数。
@@ -38,6 +41,7 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> str:
         return f"读取失败: {e}"
 
 
+@register_tool
 @tool
 def write_file(path: str, content: str) -> str:
     """写入内容到文件（覆盖模式）。
@@ -57,6 +61,7 @@ def write_file(path: str, content: str) -> str:
         return f"写入失败: {e}"
 
 
+@register_tool
 @tool
 def edit_file(path: str, old_string: str, new_string: str) -> str:
     """在文件中替换文本（替换首次出现）。old_string 和 new_string 必须不同。
@@ -83,6 +88,7 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
         return f"编辑失败: {e}"
 
 
+@register_tool
 @tool
 def list_files(path: str = ".") -> str:
     """列出目录下的文件和子目录。
@@ -105,6 +111,7 @@ def list_files(path: str = ".") -> str:
         return f"列出失败: {e}"
 
 
+@register_tool
 @tool
 def glob_files(pattern: str) -> str:
     """使用 glob 模式匹配文件。
