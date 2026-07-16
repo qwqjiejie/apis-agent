@@ -165,3 +165,80 @@ async def shell_confirm(req: ShellConfirmRequest):
     if not ok_result:
         return error(404, "确认请求不存在或已过期")
     return ok(None, message="已确认" if req.approved else "已拒绝")
+
+
+# ---- 统一入口 + 后台任务 ----
+
+class TaskQueryRequest(BaseModel):
+    taskId: str = Field(..., min_length=1)
+
+
+@router.post("/chat")
+async def agent_chat(req: StreamRequest):
+    """统一对话入口 — TriageAgent 自动判断分流。"""
+    _check_query_length(req.query)
+
+    from src.apis_agent.agent.triage_agent import TriageAgent
+
+    async def event_generator():
+        agent = TriageAgent(req.conversationId, req.query, req.fileId)
+        async for payload in agent.run():
+            yield payload
+
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/task/status")
+async def task_status(req: TaskQueryRequest):
+    from src.apis_agent.harness.task_executor import task_executor
+
+    result = task_executor.get_status(req.taskId)
+    if not result:
+        return error(404, "任务不存在")
+    return ok(result)
+
+
+@router.post("/task/stream")
+async def task_stream(req: TaskQueryRequest):
+    """SSE 流式获取后台任务执行进度。"""
+    from src.apis_agent.harness.task_executor import task_executor
+    from src.apis_agent.harness.task_context import TaskStatus
+
+    snapshot = task_executor.get_status(req.taskId)
+    if not snapshot:
+        async def _err():
+            yield make_sse(json.dumps({"type": "error", "content": "任务不存在"}, ensure_ascii=False))
+        return EventSourceResponse(_err())
+
+    async def event_generator():
+        status = snapshot["status"]
+        if status == TaskStatus.COMPLETED.value:
+            yield make_sse(json.dumps({"type": "text", "content": snapshot.get("result", "")}, ensure_ascii=False))
+        elif status == TaskStatus.FAILED.value:
+            yield make_sse(json.dumps({"type": "error", "content": snapshot.get("error", "执行失败")}, ensure_ascii=False))
+        elif status == TaskStatus.CANCELLED.value:
+            yield make_sse(json.dumps({"type": "error", "content": "任务已取消"}, ensure_ascii=False))
+        elif status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value):
+            yield make_sse(json.dumps({
+                "type": "task_status", "taskId": req.taskId, "status": status,
+            }, ensure_ascii=False))
+        yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
+        yield make_sse("[DONE]")
+
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/task/cancel")
+async def task_cancel(req: TaskQueryRequest):
+    from src.apis_agent.harness.task_executor import task_executor
+
+    if task_executor.cancel(req.taskId):
+        return ok(None, message="已发送取消信号")
+    return error(404, "任务不存在")
+
+
+@router.post("/task/list")
+async def task_list():
+    from src.apis_agent.harness.task_executor import task_executor
+
+    return ok(task_executor.list_tasks())
