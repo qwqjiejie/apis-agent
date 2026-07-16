@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = ""
 
+    # Neo4j 知识图谱配置（可选）
+    neo4j_uri: str = ""
+    neo4j_user: str = ""
+    neo4j_password: str = ""
+
     # Embedding 配置
     embedding_model: str = "text-embedding-v4"
     embedding_dim: int = 1024

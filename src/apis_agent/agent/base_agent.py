@@ -241,6 +241,7 @@ class BaseAgent(ABC):
             tools=tools,
             agent_type=agent_type,
             fileid=self.file_id,
+            user_id=getattr(self, "_user_id", ""),
         )
         input_tokens = getattr(self, "_input_tokens", 0)
         logger.info(f"Token 用量: 输入~{input_tokens}, 输出~{output_tokens}, 会话={self.conversation_id}")

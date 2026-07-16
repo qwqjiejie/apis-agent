@@ -12,6 +12,8 @@ from src.apis_agent.api.middleware.rate_limit import RateLimitMiddleware
 from src.apis_agent.api.routes.agent import router as agent_router
 from src.apis_agent.api.routes.session import router as session_router
 from src.apis_agent.api.routes.file import router as file_router
+from src.apis_agent.api.routes.skill_routes import router as skill_router
+from src.apis_agent.api.routes.auth_routes import router as auth_router
 from src.apis_agent.common.exceptions import ApisAgentError, InfrastructureError, ValidationError
 from src.apis_agent.common.logger import logger
 from src.apis_agent.common.trace_context import generate_trace_id, set_trace_context
@@ -29,6 +31,27 @@ async def lifespan(app: FastAPI):
     if tools_dir.is_dir():
         await hot_reloader.start()
 
+    # 初始化 SkillManager（DB 同步 + 定时刷新）
+    from src.apis_agent.skill.skill_manager import skill_manager
+    from src.apis_agent.storage.db import new_session
+    try:
+        skill_manager.init_db(new_session())
+    except Exception as e:
+        logger.warning(f"SkillManager DB 初始化失败（Skills 仅从文件系统加载）: {e}")
+
+    # 初始化 Neo4j 知识图谱（可选）
+    from src.apis_agent.stores.neo4j_manager import neo4j_manager
+    from src.apis_agent.rag.graph_rag import graph_rag_service
+    try:
+        await neo4j_manager.initialize(
+            uri=get_settings().neo4j_uri,
+            user=get_settings().neo4j_user,
+            password=get_settings().neo4j_password,
+        )
+        graph_rag_service._neo4j = neo4j_manager
+    except Exception as e:
+        logger.warning(f"Neo4j 初始化跳过: {e}")
+
     # 启动模型网关健康探活
     from src.apis_agent.gateway.model_gateway import model_gateway
     from src.apis_agent.config.settings import get_settings
@@ -38,6 +61,8 @@ async def lifespan(app: FastAPI):
 
     await hot_reloader.stop()
     await model_gateway.stop_probe()
+    if neo4j_manager.available:
+        await neo4j_manager.close()
 
 
 app = FastAPI(title="APIs Agent", lifespan=lifespan)
@@ -115,6 +140,8 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 app.include_router(agent_router, prefix="/api/v1")
 app.include_router(session_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1")
+app.include_router(skill_router)
+app.include_router(auth_router)
 
 # ---- 静态文件 ----
 

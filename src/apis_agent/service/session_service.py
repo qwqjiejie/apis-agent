@@ -14,9 +14,10 @@ class Store(BaseStore):
                      tools: str = "", agent_type: str = "chat", fileid: str = "",
                      user_id: str = "") -> None:
         now = datetime.now(timezone.utc)
+        uid = user_id or ""
         self._repo().save(AiSession(
             session_id=session_id,
-            user_id=user_id,
+            user_id=uid,
             question=question, answer=answer,
             thinking=thinking, reference=reference, recommend=recommend,
             tools=tools, agent_type=agent_type, fileid=fileid,
@@ -27,8 +28,8 @@ class Store(BaseStore):
         rows = self._repo().find_by_session_id(session_id, limit)
         return [{c.name: getattr(r, c.name) for c in r.__table__.columns} for r in rows]
 
-    def list_sessions(self, page: int = 1, size: int = 100) -> tuple[list[dict], int]:
-        rows, total = self._repo().list_distinct_sessions(page, size)
+    def list_sessions(self, page: int = 1, size: int = 100, user_id: str = "") -> tuple[list[dict], int]:
+        rows, total = self._repo().list_distinct_sessions(page, size, user_id=user_id)
         return [
             {"conversationId": r.session_id, "question": r.question or "",
              "agentType": r.agent_type or "chat", "fileid": r.fileid or ""}

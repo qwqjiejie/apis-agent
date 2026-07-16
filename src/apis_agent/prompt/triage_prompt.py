@@ -36,6 +36,7 @@ def _build_specialist_table(subagents: list[dict]) -> str:
 
 def _build_tool_section() -> str:
     from src.apis_agent.tool import TOOL_REGISTRY
+    from src.apis_agent.tool.tool_search import DEFERRED_TOOL_NAMES
 
     _CATEGORIES: dict[str, str] = {
         "src.apis_agent.tool.common": "通用工具",
@@ -51,6 +52,8 @@ def _build_tool_section() -> str:
     uncategorized: list[tuple[str, str]] = []
 
     for name, tool in TOOL_REGISTRY.items():
+        if name in DEFERRED_TOOL_NAMES or name == "tool_search":
+            continue  # 延迟工具和 tool_search 本身不在常驻列表中展示
         module = getattr(tool, "__module__", "")
         desc = (getattr(tool, "description", "") or "").split("\n")[0]
         cat = _CATEGORIES.get(module)
@@ -94,15 +97,21 @@ def build_triage_prompt(subagents: list[dict] | None = None) -> str:
 |------------|---------|
 {specialist_table}
 
-## 可用工具
+## 工具发现机制（两层）
 
-系统已自动绑定以下工具，根据场景选择调用：
+### 常驻工具（可直接使用）
+以下工具始终可用，无需搜索：
 
 {tool_section}
-### 任务管理工具
+- **tool_search**: 按关键词搜索延迟工具库。当常驻工具不足以完成任务时使用
 - **task**: 将子任务委托给上表中的 Specialist（同步返回结果）
 - **create_background_task**: 将复杂任务转为后台异步执行
 - **get_task_status**: 查询后台任务状态、进度和结果
+
+### 延迟工具（需 search 发现）
+部分专业工具（数据处理、图表、术语表等）不在上述常驻列表中。
+当你需要的能力在常驻工具中找不到时，**先调用 ``tool_search``** 搜索，
+找到后再调用具体工具。不要猜测工具名——必须 search 后再用。
 
 ## 分流规则
 

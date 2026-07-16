@@ -306,19 +306,19 @@ createApp({
                 messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
             }
 
-            const apiUrl = APP_API.getStreamChatUrl(backendUrl.value, selectedAgent.value, hasFile && fileIdToSend);
+            const apiUrl = APP_API.getStreamChatUrl(backendUrl.value);
+            const prefixedMessage = APP_API.buildPrefixedMessage(message, selectedAgent.value, hasFile && fileIdToSend);
 
             try {
                 abortController = new AbortController();
                 const signal = abortController.signal;
 
                 const body = {
-                    query: message || (hasFile ? '请分析这个文件' : ''),
+                    message: prefixedMessage,
                     conversationId: currentChatId.value,
+                    fileIds: hasFile && fileIdToSend ? [fileIdToSend] : [],
+                    online: true,
                 };
-                if (hasFile && fileIdToSend) {
-                    body.fileId = fileIdToSend;
-                }
 
                 const response = await fetch(apiUrl, {
                     method: 'POST',

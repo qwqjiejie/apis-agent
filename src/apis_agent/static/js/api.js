@@ -148,18 +148,26 @@ const uploadFile = async (backendUrl, file) => {
     throw new Error(result.message || '文件上传失败');
 };
 
-// 获取流式聊天 API URL
-const getStreamChatUrl = (backendUrl, selectedAgent, hasFile) => {
-    if (hasFile) {
-        return `${backendUrl}/api/v1/agent/file/stream`;
-    } else if (selectedAgent === 'ppt') {
-        return `${backendUrl}/api/v1/agent/pptx/stream`;
-    } else if (selectedAgent === 'deep') {
-        return `${backendUrl}/api/v1/agent/deep/stream`;
-    } else if (selectedAgent === 'skills') {
-        return `${backendUrl}/api/v1/agent/skills/stream`;
-    }
-    return `${backendUrl}/api/v1/agent/chat/stream`;
+// 能力前缀映射（前端根据选中Agent拼接前缀到用户消息前）
+const CAPABILITY_PREFIX_MAP = {
+    'chat': '',
+    'ppt': '生成ppt: ',
+    'deep': '深度研究: ',
+    'skills': '',
+    'file': '分析文档: ',
+};
+
+// 获取流式聊天 API URL（统一入口）
+const getStreamChatUrl = (backendUrl) => {
+    return `${backendUrl}/api/v1/agent/chat`;
+};
+
+// 构建能力前缀消息
+const buildPrefixedMessage = (message, agentType, hasFile) => {
+    if (hasFile && !message) return '分析文档: 请帮我分析上传的文件';
+    if (!message) return message;
+    const prefix = CAPABILITY_PREFIX_MAP[agentType] || '';
+    return prefix + message;
 };
 
 // 停止流式请求
@@ -189,5 +197,6 @@ window.APP_API = {
     deleteChat,
     uploadFile,
     getStreamChatUrl,
+    buildPrefixedMessage,
     stopStream
 };

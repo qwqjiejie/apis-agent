@@ -100,9 +100,16 @@ class FileService:
                 except S3Error as e:
                     logger.error(f"MinIO 上传失败: {e}")
 
-            # 文本解析
+            # 文本解析（PDF 优先走 MinerU，否则用默认解析器）
             await event_bus.publish(file_id, DocumentStatus.PARSING.value, message="正在解析文件内容...", progress=40)
-            extracted_text = parse_file(local_path, original_name) if local_path else None
+            extracted_text = None
+            if local_path:
+                if file_type == "pdf":
+                    from src.apis_agent.readers.mineru_reader import mineru_reader
+                    logger.info(f"[FileService] 尝试 MinerU 解析: {original_name}")
+                    extracted_text = await mineru_reader.parse(local_path)
+                if not extracted_text:
+                    extracted_text = parse_file(local_path, original_name)
 
             # 文本分块 + 向量化
             embed_flag = 0

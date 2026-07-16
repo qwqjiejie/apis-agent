@@ -35,6 +35,7 @@ class ChatRequest(BaseModel):
     conversationId: str = Field(default="", min_length=0, description="会话 ID，为空则创建新会话")
     fileIds: list[str] = Field(default_factory=list, description="关联文件 ID 列表")
     online: bool = Field(default=True, description="是否开启联网搜索")
+    userId: str = Field(default="", min_length=0, description="用户 ID（匿名UUID或登录token）")
 
     def get_message(self) -> str:
         return self.message or self.query
@@ -77,9 +78,6 @@ def _check_query_length(query: str):
 async def agent_chat(req: ChatRequest):
     """统一对话入口 — TriageAgent 自动分流。
 
-    合并了原来的 /chat/stream, /file/stream, /pptx/stream,
-    /deep/stream, /skills/stream, /chat 六个端点。
-
     前端通过 message 前缀或 fileIds 参数传递能力选择：
     - "生成ppt: ..." → Triage 优先使用 ppt_specialist
     - "深度研究: ..." → Triage 优先使用 research_specialist
@@ -96,7 +94,7 @@ async def agent_chat(req: ChatRequest):
 
     async def event_generator():
         agent = TriageAgent(conversation_id, query, ",".join(req.fileIds) if req.fileIds else "")
-        # online 和 fileIds 信息通过 TriageAgent 内部处理
+        agent._user_id = req.userId or ""  # 注入用户ID
         async for payload in agent.run():
             yield payload
 

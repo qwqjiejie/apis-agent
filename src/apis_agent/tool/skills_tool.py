@@ -1,62 +1,48 @@
-import logging
-import os
-import re
-from typing import Any
+"""SkillsTool — 从 SkillManager 动态加载 enabled skills。"""
 
-from langchain_core.tools import StructuredTool
+import logging
+from typing import Any
 
 logger = logging.getLogger("apis")
 
-SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
-
-
-def _parse_skill(filepath: str) -> dict | None:
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception:
-        return None
-
-    meta = {}
-    body = content
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-    if m:
-        body = content[m.end():]
-        for line in m.group(1).strip().split("\n"):
-            if ":" in line:
-                k, v = line.split(":", 1)
-                meta[k.strip()] = v.strip()
-
-    name = meta.get("name", os.path.basename(os.path.dirname(filepath)))
-    description = meta.get("description", f"技能: {name}")
-    return {"name": name, "description": description, "body": body.strip(), "path": filepath}
-
-
-def _make_skill_tool(skill: dict) -> Any:
-    name = skill["name"].replace("-", "_").replace(" ", "_")
-
-    def skill_func(query: str = "") -> str:
-        """执行技能（由 agent 自动调用）"""
-        return skill["body"]
-
-    skill_func.__name__ = name
-
-    return StructuredTool.from_function(
-        func=skill_func,
-        name=name,
-        description=skill["description"],
-    )
-
 
 def load_skills() -> list:
-    if not os.path.isdir(SKILLS_DIR):
-        return []
+    """从 SkillManager 加载所有 enabled skills，构建工具列表。
+
+    DB 不可用时自动回退到文件系统扫描。
+    """
+    from src.apis_agent.skill.skill_manager import skill_manager
+    from src.apis_agent.utils.frontmatter_utils import parse_frontmatter
+    from pathlib import Path
+
+    dirs = skill_manager.get_enabled_skill_dirs()
     tools = []
-    for root, dirs, files in os.walk(SKILLS_DIR):
-        for f in files:
-            if f.upper() == "SKILL.MD":
-                skill = _parse_skill(os.path.join(root, f))
-                if skill:
-                    tools.append(_make_skill_tool(skill))
-                    logger.info(f"[skills] 加载: {skill['name']}")
+    for d in dirs:
+        skill_md = Path(d) / "SKILL.md"
+        if not skill_md.is_file():
+            continue
+        spec = parse_frontmatter(skill_md)
+        name = spec.get("name", Path(d).name)
+        description = spec.get("description", f"技能: {name}")
+        body = spec.get("body", "")
+
+        # 构建 LangChain 工具
+        from langchain_core.tools import StructuredTool
+
+        safe_name = name.replace("-", "_").replace(" ", "_")
+
+        def _make_func(skill_body: str, skill_name: str):
+            def skill_func(query: str = "") -> str:
+                return skill_body
+            skill_func.__name__ = skill_name
+            return skill_func
+
+        tool = StructuredTool.from_function(
+            func=_make_func(body, safe_name),
+            name=safe_name,
+            description=description,
+        )
+        tools.append(tool)
+        logger.info(f"[SkillsTool] 加载: {name} ({d})")
+
     return tools

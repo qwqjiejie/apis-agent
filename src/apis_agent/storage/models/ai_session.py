@@ -46,18 +46,20 @@ class AiSessionRepo(BaseRepository[AiSession]):
             order_by=AiSession.created_at.asc(),
         )[-limit:]
 
-    def list_distinct_sessions(self, page: int = 1, size: int = 100) -> tuple[list[AiSession], int]:
+    def list_distinct_sessions(self, page: int = 1, size: int = 100, user_id: str = "") -> tuple[list[AiSession], int]:
         sub = (
             select(func.min(AiSession.id).label("first_id"))
             .group_by(AiSession.session_id)
             .subquery()
         )
-        total = self.count()
-        rows, _ = self.paginate(
-            page, size,
-            AiSession.id.in_(select(sub.c.first_id)),
-            order_by=AiSession.created_at.desc(),
-        )
+        where = AiSession.id.in_(select(sub.c.first_id))
+        if user_id:
+            where_uid = AiSession.user_id == user_id
+            total = self.count(where_uid)
+            rows, _ = self.paginate(page, size, where_uid & where, order_by=AiSession.created_at.desc())
+        else:
+            total = self.count()
+            rows, _ = self.paginate(page, size, where, order_by=AiSession.created_at.desc())
         return rows, total
 
     def delete_by_session_id(self, session_id: str) -> int:
