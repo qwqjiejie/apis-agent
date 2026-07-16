@@ -1,0 +1,31 @@
+{
+  "goldens": [
+    {
+      "scenario": "简单事实查询",
+      "expected_outcome": "Agent应使用搜索工具查找信息并给出准确回答，在回答末尾列出参考来源",
+      "turns": [
+        {"role": "user", "content": "2024年诺贝尔物理学奖获得者是谁？"}
+      ],
+      "additional_metadata": {
+        "expected_tools": ["tavily_search"]
+      }
+    },
+    {
+      "scenario": "多步骤信息查询",
+      "expected_outcome": "Agent应能分步骤查询不同信息并综合回答",
+      "turns": [
+        {"role": "user", "content": "比较Python和Go语言在Web开发中的优缺点"}
+      ],
+      "additional_metadata": {
+        "expected_tools": ["tavily_search"]
+      }
+    },
+    {
+      "scenario": "文件内容问答",
+      "expected_outcome": "Agent应优先基于文件内容回答，若文件内容不足则结合搜索补充",
+      "turns": [
+        {"role": "user", "content": "请基于上传的文件总结核心内容"}
+      ]
+    }
+  ]
+}

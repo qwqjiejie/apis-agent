@@ -102,7 +102,7 @@ async def agent_pptx_download(req: StopRequest):
         bucket, obj_name = bucket_obj.split("/", 1)
         try:
             client = Minio(
-                get_settings().minio_endpoint,
+                f"{get_settings().minio_host}:{get_settings().minio_port}",
                 access_key=get_settings().minio_access_key,
                 secret_key=get_settings().minio_secret_key,
                 secure=False,

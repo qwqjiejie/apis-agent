@@ -1,8 +1,14 @@
-from fastapi import APIRouter, UploadFile, File, Form
-from pydantic import BaseModel, Field
+import asyncio
+import json
 
+from fastapi import APIRouter, UploadFile, File, Form, Request
+from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
+
+from src.apis_agent.document.document_event_bus import event_bus
 from src.apis_agent.service.file_service import file_service
 from src.apis_agent.common.response import ok, ok_paged, error
+from src.apis_agent.common.streaming import make_sse
 
 router = APIRouter(prefix="/file", tags=["file"])
 
@@ -27,7 +33,7 @@ async def file_upload(
         file: UploadFile = File(...),
         conversationId: str = Form(default=""),
 ):
-    result = file_service.upload(file, conversationId)
+    result = await file_service.upload(file, conversationId)
     return ok(result)
 
 
@@ -58,3 +64,25 @@ async def file_delete(req: FileDetailRequest):
 @router.post("/exists")
 async def file_exists(req: FileDetailRequest):
     return ok(file_service.exists(req.fileId))
+
+
+@router.post("/progress")
+async def file_progress(req: FileDetailRequest):
+    """SSE 流式推送文档处理进度。"""
+
+    async def event_generator():
+        queue = event_bus.subscribe(req.fileId)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=120)
+                    yield make_sse(json.dumps(event, ensure_ascii=False))
+                    if event.get("status") in ("ready", "failed", "skipped"):
+                        break
+                except asyncio.TimeoutError:
+                    yield make_sse(json.dumps({"type": "error", "content": "进度超时"}, ensure_ascii=False))
+                    break
+        finally:
+            event_bus.unsubscribe(req.fileId)
+
+    return EventSourceResponse(event_generator())

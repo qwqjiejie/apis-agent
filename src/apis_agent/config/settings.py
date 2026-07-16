@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     mysql_db: str = "apis"
 
     # MinIO 配置
-    minio_endpoint: str = ""
+    minio_host: str = ""
+    minio_port: int = 9000
     minio_access_key: str = ""
     minio_secret_key: str = ""
     minio_bucket: str = "apis"

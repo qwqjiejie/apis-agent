@@ -797,10 +797,10 @@ async def _handle_render(agent: PptBuilderAgent, llm):
     from minio.error import S3Error
 
     file_url = ""
-    if get_settings().minio_endpoint:
+    if get_settings().minio_host:
         try:
             client = Minio(
-                get_settings().minio_endpoint,
+                f"{get_settings().minio_host}:{get_settings().minio_port}",
                 access_key=get_settings().minio_access_key,
                 secret_key=get_settings().minio_secret_key,
                 secure=False,
