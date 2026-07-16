@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import BigInteger, String, Text, DateTime, Index, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -10,38 +10,40 @@ class Base(DeclarativeBase):
 
 
 class AiSession(Base):
-    __tablename__ = "ai_session"
+    __tablename__ = "agentx_session"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), default="")
     question: Mapped[str | None] = mapped_column(Text)
     answer: Mapped[str | None] = mapped_column(Text)
-    tools: Mapped[str | None] = mapped_column(String(1024))
-    first_response_time: Mapped[int | None] = mapped_column(BigInteger)
-    total_response_time: Mapped[int | None] = mapped_column(BigInteger)
-    create_time: Mapped[datetime | None] = mapped_column(DateTime)
-    update_time: Mapped[datetime | None] = mapped_column(DateTime)
-    reference: Mapped[str | None] = mapped_column(Text)
-    agent_type: Mapped[str | None] = mapped_column(String(255))
     thinking: Mapped[str | None] = mapped_column(Text)
-    fileid: Mapped[str | None] = mapped_column(String(255))
+    tools: Mapped[str | None] = mapped_column(String(500))
+    reference: Mapped[str | None] = mapped_column(Text)
     recommend: Mapped[str | None] = mapped_column(String(1000))
+    agent_type: Mapped[str | None] = mapped_column(String(64))
+    fileid: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
     __table_args__ = (
-        Index("idx_session_id", "session_id"),
-        Index("idx_create_time", "create_time"),
+        Index("idx_session_session_id", "session_id"),
+        Index("idx_session_user_id", "user_id"),
+        Index("idx_session_created_at", "created_at"),
     )
 
 
 class AiSessionRepo(BaseRepository[AiSession]):
     model = AiSession
 
-    # ---- 项目自定义方法 ----
-
     def find_by_session_id(self, session_id: str, limit: int = 20) -> list[AiSession]:
         return self.find_by(
             AiSession.session_id == session_id,
-            order_by=AiSession.create_time.asc(),
+            order_by=AiSession.created_at.asc(),
         )[-limit:]
 
     def list_distinct_sessions(self, page: int = 1, size: int = 100) -> tuple[list[AiSession], int]:
@@ -54,7 +56,7 @@ class AiSessionRepo(BaseRepository[AiSession]):
         rows, _ = self.paginate(
             page, size,
             AiSession.id.in_(select(sub.c.first_id)),
-            order_by=AiSession.create_time.desc(),
+            order_by=AiSession.created_at.desc(),
         )
         return rows, total
 

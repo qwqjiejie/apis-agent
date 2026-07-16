@@ -1,37 +1,29 @@
+"""ExecutorAgent — 后台任务执行引擎。
+
+基于 create_react_agent，持有精简工具集（task/request_approval/read_task_journal）。
+在 TaskExecutor 的后台 asyncio.Task 中运行，不继承 BaseAgent。
+"""
+
 import asyncio
 import json
+import logging
 
-from langchain.agents import create_agent
-
-from src.apis_agent.common.llm import build_llm
-from src.apis_agent.common.logger import logger
 from src.apis_agent.common.streaming import make_event, make_sse
 from src.apis_agent.harness.subagent_discovery import discover_specialists
+from src.apis_agent.prompt.executor_prompt import build_executor_prompt
 from src.apis_agent.tool import TOOL_REGISTRY
 
-EXECUTOR_PROMPT = """你是一个后台任务执行器，负责自主规划和执行复杂任务。
-
-可用工具：
-- 搜索工具 (tavily_search): 联网搜索信息
-- 其他注册工具
-
-执行原则：
-1. 分析任务需求，制定执行步骤
-2. 逐步执行，每步完成后评估结果
-3. 如果某步骤失败，尝试替代方案
-4. 所有步骤完成后，生成最终报告
-
-当前可用的子Agent（可通过委派工具使用）：
-{subagents}
-
-使用中文输出，清晰、有条理。"""
+logger = logging.getLogger("apis")
 
 
 class ExecutorAgent:
     """后台任务执行 Agent。
 
     不继承 BaseAgent（不在 HTTP 请求上下文中运行），
-    而是作为独立 Agent 在 TaskExecutor 的后台 asyncio.Task 中执行。
+    在 TaskExecutor 的后台 asyncio.Task 中自治执行。
+
+    与 TriageAgent 使用同一套 create_agent 工厂，
+    差异仅在于 system_prompt（引导逐步执行）和 tools（精简）。
     """
 
     def __init__(self, snapshot, plan_text: str = ""):
@@ -40,29 +32,31 @@ class ExecutorAgent:
         self.cancel_event = snapshot.cancel_event
 
     async def run(self):
+        from src.apis_agent.agent.agent_factory import create_executor_agent
+        from src.apis_agent.gateway.model_gateway import model_gateway
+
         yield {"_task_status": "running"}
 
         try:
-            llm = build_llm()
             specialists = discover_specialists()
+            prompt = build_executor_prompt(specialists)
 
-            # 构建工具列表：注册工具 + 子Agent 作为可委派工具
-            tools = list(TOOL_REGISTRY.values())
+            # Executor 工具：task（委托 Specialist）
+            executor_tools: list = []
+            for name in ("request_approval", "read_task_journal"):
+                if name in TOOL_REGISTRY:
+                    executor_tools.append(TOOL_REGISTRY[name])
 
-            subagent_desc = "\n".join(
-                f"- {s['name']}: {s['description']}" for s in specialists
-            ) or "(无)"
-
-            agent = create_agent(
-                llm,
-                tools,
-                system_prompt=EXECUTOR_PROMPT.format(subagents=subagent_desc),
-            )
-
-            # 构建输入：计划 + 原始查询
+            # 构建输入
             query = self.snapshot.query
             if self.plan_text:
-                query = f"执行计划：\n{self.plan_text[:500]}\n\n原始任务：{query}"
+                query = f"执行计划：\n{self.plan_text[:1000]}\n\n原始任务：{query}"
+
+            agent = await create_executor_agent(
+                tools=executor_tools,
+                system_prompt=prompt,
+                gateway=model_gateway if model_gateway._active else None,
+            )
 
             inputs = {"messages": [("user", query)]}
 
@@ -94,6 +88,6 @@ class ExecutorAgent:
         except asyncio.CancelledError:
             yield {"_task_status": "cancelled"}
         except Exception as e:
-            logger.error(f"[ExecutorAgent] 异常: {e}")
+            logger.error(f"[ExecutorAgent] 异常: {e}", exc_info=True)
             self.snapshot.error = str(e)
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))

@@ -124,7 +124,7 @@ class BaseAgent(ABC):
     3. 停止监听：Redis Pub/Sub 跨实例停止信号 + 本地 asyncio.Event
     4. 上下文管理：加载历史 → Layer1 占位符压缩 → Layer2 后台 LLM 摘要
     5. 文件上下文：RAG 检索拼接文件内容到 prompt
-    6. 消息持久化：执行完成后将问答对保存到 MySQL（含 token 用量）
+    6. 消息持久化：执行完成后将问答对保存到 PostgreSQL（含 token 用量）
     7. 资源清理：取消监听、移除任务、释放锁
     """
 
@@ -229,7 +229,7 @@ class BaseAgent(ABC):
             logger.warning(f"Layer 2 压缩失败: {e}")
 
     def _save_message(self, answer="", thinking="", references="", recommend="", tools="", agent_type="chat"):
-        """将本轮问答持久化到 MySQL，并记录 token 用量日志。"""
+        """将本轮问答持久化到 PostgreSQL，并记录 token 用量日志。"""
         output_tokens = estimate_messages_tokens([("assistant", answer)])
         store.save_message(
             session_id=self.conversation_id,

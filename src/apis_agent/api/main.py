@@ -21,10 +21,9 @@ from src.apis_agent.common.trace_context import generate_trace_id, set_trace_con
 async def lifespan(app: FastAPI):
     # 启动工具热加载器
     from src.apis_agent.harness.tool_hot_reloader import ToolHotReloader
-    from src.apis_agent.agent.chat_agent import invalidate_cached_agents
 
     tools_dir = Path(__file__).resolve().parent.parent / "tool"
-    hot_reloader = ToolHotReloader(tools_dir, on_reload=invalidate_cached_agents)
+    hot_reloader = ToolHotReloader(tools_dir, on_reload=None)
     app.state.tool_hot_reloader = hot_reloader
 
     if tools_dir.is_dir():

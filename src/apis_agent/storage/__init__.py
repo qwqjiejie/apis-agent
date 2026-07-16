@@ -4,9 +4,10 @@ from abc import ABC, abstractmethod
 class BaseStore(ABC):
 
     @abstractmethod
-    def save_message(self, session_id: str, question: str, answer: str, *, thinking: str = "",
-                     reference: str = "", recommend: str = "", tools: str = "", agent_type: str = "chat",
-                     fileid: str = "") -> None: ...
+    def save_message(self, session_id: str, question: str, answer: str, *,
+                     thinking: str = "", reference: str = "", recommend: str = "",
+                     tools: str = "", agent_type: str = "chat", fileid: str = "",
+                     user_id: str = "") -> None: ...
 
     @abstractmethod
     def load_history(self, session_id: str, limit: int = 20) -> list[dict]: ...

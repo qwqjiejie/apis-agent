@@ -9,23 +9,31 @@ _engine = None
 _SessionLocal: sessionmaker | None = None
 
 
+def _build_pg_url() -> str:
+    s = get_settings()
+    return (
+        f"postgresql+psycopg2://{s.pg_user}:{s.pg_password}"
+        f"@{s.pg_host}:{s.pg_port}/{s.pg_db}"
+    )
+
+
 def get_engine():
     global _engine
     if _engine is None:
-        url = f"mysql+pymysql://{get_settings().mysql_user}:{get_settings().mysql_pass}@{get_settings().mysql_host}:{get_settings().mysql_port}/{get_settings().mysql_db}?charset=utf8mb4"
-        _engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600)
+        _engine = create_engine(_build_pg_url(), pool_pre_ping=True, pool_recycle=3600)
     return _engine
 
 
 def check_db():
-    """启动时强制检查 MySQL 连接，失败则抛出 DatabaseError。"""
+    """启动时强制检查 PostgreSQL 连接，失败则抛出 DatabaseError。"""
     try:
         s = new_session()
         s.execute(text("SELECT 1"))
         s.close()
-        logger.info(f"MySQL 连接成功: {get_settings().mysql_host}:{get_settings().mysql_port}/{get_settings().mysql_db}")
+        s = get_settings()
+        logger.info(f"PostgreSQL 连接成功: {s.pg_host}:{s.pg_port}/{s.pg_db}")
     except Exception as e:
-        raise DatabaseError(f"MySQL 连接失败: {e}")
+        raise DatabaseError(f"PostgreSQL 连接失败: {e}")
 
 
 def new_session() -> Session:

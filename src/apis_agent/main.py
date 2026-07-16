@@ -20,7 +20,7 @@ def _check_infrastructure():
     from src.apis_agent.storage.vector_store import vector_store
 
     services = [
-        ("MySQL", check_db),
+        ("PostgreSQL", check_db),
         ("Redis", check_redis),
         ("Milvus", vector_store.check_milvus),
     ]

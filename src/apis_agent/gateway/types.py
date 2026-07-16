@@ -42,6 +42,15 @@ class HealthRecord:
         self.p95_latency_ms = _percentile(self.latency_samples, 95)
 
 
+class ModelRole(Enum):
+    """模型角色枚举，用于网关按角色路由。"""
+    CHAT = "chat"
+    FALLBACK_CHAT = "fallback_chat"
+    VISION = "vision"
+    EMBEDDING = "embedding"
+    RETRIEVAL_REWRITER = "retrieval_rewriter"
+
+
 def _percentile(data: list[float], p: float) -> float:
     if not data:
         return 0.0

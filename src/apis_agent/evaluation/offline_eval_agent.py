@@ -82,7 +82,7 @@ def build_metrics():
 async def run_case(golden: dict, metrics: list) -> dict:
     """执行单条 Agent 评估用例。"""
     from deepeval.test_case import ConversationalTestCase, Turn
-    from src.apis_agent.agent.chat_agent import ChatAgent
+    from src.apis_agent.agent.triage_agent import TriageAgent
 
     turns = golden.get("turns", [])
     test_turns = []
@@ -92,7 +92,7 @@ async def run_case(golden: dict, metrics: list) -> dict:
             continue
 
         session_id = f"eval_{uuid.uuid4().hex[:8]}"
-        agent = ChatAgent(session_id, turn["content"], agent_type="chat")
+        agent = TriageAgent(session_id, turn["content"])
         output_text = ""
         tool_names = []
 

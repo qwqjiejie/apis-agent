@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from src.apis_agent.agent.base_agent import BaseAgent
-from src.apis_agent.agent.chat_agent import ChatAgent
 from src.apis_agent.common.exceptions import QueryTooLongError, ValidationError
 from src.apis_agent.common.logger import logger
 from src.apis_agent.common.redis import publish_stop
@@ -19,10 +18,29 @@ from src.apis_agent.tool.bash_tool import resolve_confirmation
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
-class StreamRequest(BaseModel):
-    query: str = Field(..., min_length=1)
-    conversationId: str = Field(..., min_length=1)
-    fileId: str = ""
+# ═══════════════════════════════════════════
+# Request Models
+# ═══════════════════════════════════════════
+
+class ChatRequest(BaseModel):
+    """统一对话请求。
+
+    message 支持能力前缀格式，例如:
+      - "生成ppt: 帮我做一份AI行业PPT"
+      - "深度研究: 量子计算金融应用前景"
+      - "今天天气怎么样"  (无前缀，Triage 自行分流)
+    """
+    message: str = Field(default="", min_length=0, description="用户消息，可选能力前缀")
+    query: str = Field(default="", min_length=0, description="(已废弃) 同 message，保留向后兼容")
+    conversationId: str = Field(default="", min_length=0, description="会话 ID，为空则创建新会话")
+    fileIds: list[str] = Field(default_factory=list, description="关联文件 ID 列表")
+    online: bool = Field(default=True, description="是否开启联网搜索")
+
+    def get_message(self) -> str:
+        return self.message or self.query
+
+    def get_conversation_id(self) -> str:
+        return self.conversationId or ""
 
 
 class StopRequest(BaseModel):
@@ -34,47 +52,60 @@ class ShellConfirmRequest(BaseModel):
     approved: bool
 
 
+class TaskQueryRequest(BaseModel):
+    taskId: str = Field(..., min_length=1)
+
+
+class GatewaySwitchRequest(BaseModel):
+    modelName: str = Field(..., min_length=1)
+
+
+# ═══════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════
+
 def _check_query_length(query: str):
     if len(query) > get_settings().max_query_length:
         raise QueryTooLongError(get_settings().max_query_length)
 
 
-@router.post("/chat/stream")
-async def agent_chat_stream(req: StreamRequest):
-    _check_query_length(req.query)
+# ═══════════════════════════════════════════
+# 统一对话入口（唯一）
+# ═══════════════════════════════════════════
+
+@router.post("/chat")
+async def agent_chat(req: ChatRequest):
+    """统一对话入口 — TriageAgent 自动分流。
+
+    合并了原来的 /chat/stream, /file/stream, /pptx/stream,
+    /deep/stream, /skills/stream, /chat 六个端点。
+
+    前端通过 message 前缀或 fileIds 参数传递能力选择：
+    - "生成ppt: ..." → Triage 优先使用 ppt_specialist
+    - "深度研究: ..." → Triage 优先使用 research_specialist
+    - fileIds 非空 → 自动注入文件分析工具
+    - 无前缀 → Triage 自行判断分流
+    """
+    query = req.get_message()
+    conversation_id = req.get_conversation_id()
+    if not query:
+        raise ValidationError("message 不能为空")
+    _check_query_length(query)
+
+    from src.apis_agent.agent.triage_agent import TriageAgent
 
     async def event_generator():
-        agent = ChatAgent(req.conversationId, req.query, req.fileId, agent_type="chat")
+        agent = TriageAgent(conversation_id, query, ",".join(req.fileIds) if req.fileIds else "")
+        # online 和 fileIds 信息通过 TriageAgent 内部处理
         async for payload in agent.run():
             yield payload
 
     return EventSourceResponse(event_generator())
 
 
-@router.post("/file/stream")
-async def agent_file_stream(req: StreamRequest):
-    _check_query_length(req.query)
-
-    async def event_generator():
-        agent = ChatAgent(req.conversationId, req.query, req.fileId, agent_type="chat")
-        async for payload in agent.run():
-            yield payload
-
-    return EventSourceResponse(event_generator())
-
-
-@router.post("/pptx/stream")
-async def agent_pptx_stream(req: StreamRequest):
-    _check_query_length(req.query)
-
-    async def event_generator():
-        from src.apis_agent.agent.ppt_builder_agent import PptBuilderAgent
-        agent = PptBuilderAgent(req.conversationId, req.query)
-        async for payload in agent.run():
-            yield payload
-
-    return EventSourceResponse(event_generator())
-
+# ═══════════════════════════════════════════
+# PPT 文件下载（保留）
+# ═══════════════════════════════════════════
 
 @router.post("/pptx/download")
 async def agent_pptx_download(req: StopRequest):
@@ -84,7 +115,7 @@ async def agent_pptx_download(req: StopRequest):
     from src.apis_agent.storage.models.ai_ppt_inst import PptInstRepo
 
     repo = PptInstRepo()
-    inst = repo.find_by_conversation_id(req.conversationId)
+    inst = repo.find_by_session_id(req.conversationId)
     if not inst or not inst.file_url:
         return error(404, "PPT文件不存在")
 
@@ -94,8 +125,10 @@ async def agent_pptx_download(req: StopRequest):
         local_path = file_url[len("local://"):]
         if not os.path.exists(local_path):
             return error(404, "文件已被清理")
-        return FileResponse(local_path, filename=os.path.basename(local_path),
-                            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        return FileResponse(
+            local_path, filename=os.path.basename(local_path),
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
 
     if file_url.startswith("minio://"):
         bucket_obj = file_url[len("minio://"):]
@@ -108,8 +141,8 @@ async def agent_pptx_download(req: StopRequest):
                 secure=False,
             )
             from io import BytesIO
-
             from fastapi.responses import StreamingResponse
+
             data = client.get_object(bucket, obj_name)
             return StreamingResponse(
                 BytesIO(data.read()),
@@ -122,31 +155,9 @@ async def agent_pptx_download(req: StopRequest):
     return error(404, "无效的文件路径")
 
 
-@router.post("/deep/stream")
-async def agent_deep_stream(req: StreamRequest):
-    _check_query_length(req.query)
-
-    from src.apis_agent.agent.deep_research_agent import DeepResearchAgent
-
-    async def event_generator():
-        agent = DeepResearchAgent(req.conversationId, req.query, req.fileId)
-        async for payload in agent.run():
-            yield payload
-
-    return EventSourceResponse(event_generator())
-
-
-@router.post("/skills/stream")
-async def agent_skills_stream(req: StreamRequest):
-    _check_query_length(req.query)
-
-    async def event_generator():
-        agent = ChatAgent(req.conversationId, req.query, req.fileId, agent_type="skills")
-        async for payload in agent.run():
-            yield payload
-
-    return EventSourceResponse(event_generator())
-
+# ═══════════════════════════════════════════
+# 停止 / Shell 确认
+# ═══════════════════════════════════════════
 
 @router.post("/stop")
 async def agent_stop(req: StopRequest):
@@ -167,26 +178,9 @@ async def shell_confirm(req: ShellConfirmRequest):
     return ok(None, message="已确认" if req.approved else "已拒绝")
 
 
-# ---- 统一入口 + 后台任务 ----
-
-class TaskQueryRequest(BaseModel):
-    taskId: str = Field(..., min_length=1)
-
-
-@router.post("/chat")
-async def agent_chat(req: StreamRequest):
-    """统一对话入口 — TriageAgent 自动判断分流。"""
-    _check_query_length(req.query)
-
-    from src.apis_agent.agent.triage_agent import TriageAgent
-
-    async def event_generator():
-        agent = TriageAgent(req.conversationId, req.query, req.fileId)
-        async for payload in agent.run():
-            yield payload
-
-    return EventSourceResponse(event_generator())
-
+# ═══════════════════════════════════════════
+# 后台任务管理
+# ═══════════════════════════════════════════
 
 @router.post("/task/status")
 async def task_status(req: TaskQueryRequest):
@@ -200,7 +194,6 @@ async def task_status(req: TaskQueryRequest):
 
 @router.post("/task/stream")
 async def task_stream(req: TaskQueryRequest):
-    """SSE 流式获取后台任务执行进度。"""
     from src.apis_agent.harness.task_executor import task_executor
     from src.apis_agent.harness.task_context import TaskStatus
 
@@ -244,11 +237,9 @@ async def task_list():
     return ok(task_executor.list_tasks())
 
 
-# ---- 网关管理 ----
-
-class GatewaySwitchRequest(BaseModel):
-    modelName: str = Field(..., min_length=1)
-
+# ═══════════════════════════════════════════
+# 网关管理
+# ═══════════════════════════════════════════
 
 @router.post("/admin/gateway")
 async def gateway_status():
@@ -259,11 +250,9 @@ async def gateway_status():
 @router.post("/admin/gateway/switch")
 async def gateway_switch(req: GatewaySwitchRequest):
     from src.apis_agent.gateway.model_gateway import model_gateway
-    from src.apis_agent.agent.chat_agent import invalidate_cached_agents
 
     try:
         await model_gateway.set_active(req.modelName)
-        invalidate_cached_agents()
         return ok(None, message=f"已切换到 {req.modelName}")
     except ValueError as e:
         return error(400, str(e))

@@ -61,7 +61,9 @@ class BaseRepository(Generic[M]):
         return list(self._s.execute(stmt).scalars().all())
 
     def count(self, *where) -> int:
-        return self._s.query(func.count()).select_from(self.model).where(*where).scalar()
+        return self._s.execute(
+            select(func.count()).select_from(self.model).where(*where)
+        ).scalar() or 0
 
     def paginate(self, page: int = 1, size: int = 20, *where, order_by=None) -> tuple[list[M], int]:
         total = self.count(*where)

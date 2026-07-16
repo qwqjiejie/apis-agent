@@ -2,7 +2,7 @@
 
 将所有异常归为三类：
 - ApisAgentError（基类）：所有业务异常的根
-- InfrastructureError：基础设施不可用（Redis/MySQL/Milvus/MinIO），可降级恢复
+- InfrastructureError：基础设施不可用（PostgreSQL/Redis/Milvus/MinIO），可降级恢复
 - ValidationError：用户输入不合法（文件过大、类型不支持等），需提示用户
 - AgentExecutionError：Agent 运行时异常，需记录日志并通知调用方
 """
@@ -36,7 +36,7 @@ class RedisError(InfrastructureError):
 
 class DatabaseError(InfrastructureError):
     def __init__(self, message: str):
-        super().__init__(message, service="MySQL")
+        super().__init__(message, service="PostgreSQL")
 
 
 class MilvusError(InfrastructureError):

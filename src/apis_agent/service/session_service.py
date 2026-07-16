@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.apis_agent.storage import BaseStore
 from src.apis_agent.storage.models.ai_session import AiSession, AiSessionRepo
@@ -9,14 +9,18 @@ class Store(BaseStore):
     def _repo(self) -> AiSessionRepo:
         return AiSessionRepo()
 
-    def save_message(self, session_id: str, question: str, answer: str, *, thinking: str = "",
-                     reference: str = "", recommend: str = "", tools: str = "", agent_type: str = "chat",
-                     fileid: str = "") -> None:
+    def save_message(self, session_id: str, question: str, answer: str, *,
+                     thinking: str = "", reference: str = "", recommend: str = "",
+                     tools: str = "", agent_type: str = "chat", fileid: str = "",
+                     user_id: str = "") -> None:
+        now = datetime.now(timezone.utc)
         self._repo().save(AiSession(
-            session_id=session_id, question=question, answer=answer,
+            session_id=session_id,
+            user_id=user_id,
+            question=question, answer=answer,
             thinking=thinking, reference=reference, recommend=recommend,
             tools=tools, agent_type=agent_type, fileid=fileid,
-            create_time=datetime.now(), update_time=datetime.now(),
+            created_at=now, updated_at=now,
         ))
 
     def load_history(self, session_id: str, limit: int = 20) -> list[dict]:
@@ -44,7 +48,7 @@ class Store(BaseStore):
                 {"id": str(r.id), "role": "user", "question": r.question or "",
                  "answer": r.answer or "", "thinking": r.thinking or "",
                  "reference": r.reference or "",
-                 "createTime": str(r.create_time) if r.create_time else ""}
+                 "createTime": str(r.created_at) if r.created_at else ""}
                 for r in rows
             ],
         }
@@ -52,7 +56,7 @@ class Store(BaseStore):
     def delete_session(self, session_id: str) -> bool:
         from src.apis_agent.storage.models.ai_ppt_inst import PptInstRepo
         ppt_repo = PptInstRepo()
-        ppt_inst = ppt_repo.find_by_conversation_id(session_id)
+        ppt_inst = ppt_repo.find_by_session_id(session_id)
         if ppt_inst:
             ppt_repo.delete(ppt_inst)
         return self._repo().delete_by_session_id(session_id) > 0

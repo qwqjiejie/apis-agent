@@ -45,27 +45,37 @@ class ModelGateway:
     # ---- 路由 ----
 
     def get_model(self) -> tuple[str, Any] | None:
-        """获取当前应该使用的模型 (name, instance)。
+        result = self.get_model_chain(None)
+        return result[0] if result else None
+
+    def get_model_chain(self, role=None) -> list[tuple[str, Any]]:
+        """获取健康排序的模型链 (name, instance)。
 
         顺序：活跃模型（非熔断）→ 降级链 → 活跃模型（兜底）
         """
+        result: list[tuple[str, Any]] = []
+        seen: set[str] = set()
+
         if self._active and self._active in self._models:
             cb = self._breakers.get(self._active)
             if cb is None or not cb.is_open():
-                return self._active, self._models[self._active]
+                result.append((self._active, self._models[self._active]))
+                seen.add(self._active)
 
         for name in self._fallback:
-            if name not in self._models:
+            if name in seen or name not in self._models:
                 continue
             cb = self._breakers.get(name)
             if cb is not None and cb.is_open():
                 continue
-            return name, self._models[name]
+            result.append((name, self._models[name]))
+            seen.add(name)
 
-        if self._active and self._active in self._models:
-            return self._active, self._models[self._active]
+        # 兜底：活跃模型即使熔断也加入
+        if self._active and self._active not in seen and self._active in self._models:
+            result.append((self._active, self._models[self._active]))
 
-        return None
+        return result
 
     def get_active_name(self) -> str | None:
         return self._active

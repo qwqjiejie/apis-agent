@@ -3,7 +3,7 @@ import io
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -56,7 +56,7 @@ class FileService:
 
     # ---- upload ----
 
-    async def upload(self, file: UploadFile, conversation_id: str = "") -> dict:
+    async def upload(self, file: UploadFile, session_id: str = "") -> dict:
         original_name = file.filename or "unknown"
         file_type = get_file_type(original_name)
         if not is_supported(original_name):
@@ -117,18 +117,20 @@ class FileService:
 
         if self._db_ok:
             try:
+                now = datetime.now(timezone.utc)
                 FileInfoRepo().save(AiFileInfo(
                     file_id=file_id,
                     file_name=original_name,
                     file_type=file_type,
                     file_size=file_size,
+                    file_hash=file_hash,
                     minio_path=minio_path or None,
                     extracted_text=extracted_text,
-                    conversation_id=conversation_id or None,
                     status=final_status.value,
-                    created_at=datetime.now(),
-                    update_time=datetime.now(),
-                    embed=embed_flag,
+                    embed=bool(embed_flag),
+                    session_id=session_id or None,
+                    created_at=now,
+                    updated_at=now,
                 ))
             except Exception as e:
                 logger.error(f"保存文件记录失败: {e}")
@@ -224,7 +226,7 @@ class FileService:
             "fileId": r.file_id, "fileName": r.file_name,
             "fileType": r.file_type, "fileSize": r.file_size,
             "status": r.status, "createdAt": str(r.created_at) if r.created_at else "",
-            "conversationId": r.conversation_id or "",
+            "conversationId": r.session_id or "",
         }
 
     # ---- content ----

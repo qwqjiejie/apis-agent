@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o"
+    fallback_model: str = ""  # 降级模型名（留空则不启用降级）
 
     # 视觉模型配置（图片识别）
     vision_model: str = "qwen3.7-plus"
@@ -36,12 +37,16 @@ class Settings(BaseSettings):
     max_history_rounds: int = 20
     max_query_length: int = 10000
 
-    # MySQL 配置
-    mysql_host: str = "127.0.0.1"
-    mysql_port: int = 3306
-    mysql_user: str = "root"
-    mysql_pass: str = ""
-    mysql_db: str = "apis"
+    # PostgreSQL 配置 — 业务数据库
+    pg_host: str = "127.0.0.1"
+    pg_port: int = 5432
+    pg_user: str = "postgres"
+    pg_password: str = ""
+    pg_db: str = "apis_agent"
+
+    # PostgreSQL — LangGraph 专用连接（checkpointer + store）
+    # 留空则自动从 pg_* 拼接
+    langgraph_db_url: str = ""
 
     # MinIO 配置
     minio_host: str = ""
