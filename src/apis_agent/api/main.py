@@ -30,9 +30,15 @@ async def lifespan(app: FastAPI):
     if tools_dir.is_dir():
         await hot_reloader.start()
 
+    # 启动模型网关健康探活
+    from src.apis_agent.gateway.model_gateway import model_gateway
+    from src.apis_agent.config.settings import get_settings
+    await model_gateway.start_probe(get_settings().gateway_health_probe_interval_sec)
+
     yield
 
     await hot_reloader.stop()
+    await model_gateway.stop_probe()
 
 
 app = FastAPI(title="APIs Agent", lifespan=lifespan)

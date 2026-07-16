@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     deep_research_max_iterations: int = 3
     deep_research_max_sub_tasks: int = 6
 
+    # 模型网关配置
+    gateway_health_probe_interval_sec: int = 30
+    gateway_circuit_breaker_threshold: int = 5
+    gateway_circuit_breaker_cooldown_sec: int = 30
+
     # 限流配置
     rate_limit_enabled: bool = True
     rate_limit_user_per_min: int = 60

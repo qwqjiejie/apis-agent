@@ -242,3 +242,28 @@ async def task_list():
     from src.apis_agent.harness.task_executor import task_executor
 
     return ok(task_executor.list_tasks())
+
+
+# ---- 网关管理 ----
+
+class GatewaySwitchRequest(BaseModel):
+    modelName: str = Field(..., min_length=1)
+
+
+@router.post("/admin/gateway")
+async def gateway_status():
+    from src.apis_agent.gateway.model_gateway import model_gateway
+    return ok(model_gateway.get_all_status())
+
+
+@router.post("/admin/gateway/switch")
+async def gateway_switch(req: GatewaySwitchRequest):
+    from src.apis_agent.gateway.model_gateway import model_gateway
+    from src.apis_agent.agent.chat_agent import invalidate_cached_agents
+
+    try:
+        await model_gateway.set_active(req.modelName)
+        invalidate_cached_agents()
+        return ok(None, message=f"已切换到 {req.modelName}")
+    except ValueError as e:
+        return error(400, str(e))
