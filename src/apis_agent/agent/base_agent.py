@@ -47,6 +47,8 @@ async def _process_chunks(agent, inputs: dict, cancel_event: asyncio.Event,
     """
     chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
     cfg = config or {}
+    cfg.setdefault("configurable", {})
+    cfg["configurable"].setdefault("recursion_limit", 100)
 
     async def run_agent():
         try:

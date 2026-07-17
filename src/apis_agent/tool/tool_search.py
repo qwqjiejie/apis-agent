@@ -12,7 +12,7 @@ import logging
 
 from langchain_core.tools import tool
 
-from src.apis_agent.tool.registry import TOOL_REGISTRY
+from src.apis_agent.tool.registry import TOOL_REGISTRY, register_tool
 
 logger = logging.getLogger("apis")
 
@@ -35,6 +35,7 @@ def get_always_on_tools() -> dict[str, object]:
     return {n: t for n, t in TOOL_REGISTRY.items() if n not in DEFERRED_TOOL_NAMES}
 
 
+@register_tool
 @tool
 async def tool_search(query: str) -> str:
     """搜索可用工具。当常驻工具不足以完成任务时，通过关键词搜索延迟工具库。

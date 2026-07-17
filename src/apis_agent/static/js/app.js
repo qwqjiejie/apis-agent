@@ -235,6 +235,13 @@ createApp({
             uploadedFileId.value = null;
         };
 
+        // ===== 键盘事件 =====
+        const onEnterKey = (event) => {
+            // IME 输入法组合中（中文输入法等），Enter 确认输入内容，不发送
+            if (event.isComposing || event.keyCode === 229) return;
+            sendMessage();
+        };
+
         // ===== 消息发送和流式处理 =====
         const sendMessage = async (presetMessage = null) => {
             if (isSending.value || isUploading.value) return;
@@ -756,6 +763,7 @@ createApp({
             deleteChat,
             removeFile,
             handleFileSelect,
+            onEnterKey,
             sendMessage,
             stopMessage,
             toggleThinking,

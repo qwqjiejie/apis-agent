@@ -264,8 +264,8 @@
                         <!-- 输入框 -->
                         <textarea v-model="inputMessage"
                                   :placeholder="selectedAgent === 'file' && selectedFile ? '文件问答模式... (删除文件可切换回对话助手)' : '输入消息... (支持 Markdown，Shift+Enter 换行)'"
-                                  @keydown.enter.exact.prevent="sendMessage()"
-                                  @keydown.enter.shift.exact="inputMessage += '\n'"
+                                  @keydown.enter.exact.prevent="onEnterKey($event)"
+                                  @keydown.enter.shift.exact.prevent="inputMessage += '\n'"
                                   rows="1"
                                   ref="textareaInput"></textarea>
 

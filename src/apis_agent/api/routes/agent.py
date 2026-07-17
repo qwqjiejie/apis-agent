@@ -1,41 +1,38 @@
 import json
 import os
+import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from src.apis_agent.agent.base_agent import BaseAgent
 from src.apis_agent.common.exceptions import QueryTooLongError, ValidationError
+from src.apis_agent.common.llm import _create_raw_llm
 from src.apis_agent.common.logger import logger
-from src.apis_agent.common.redis import publish_stop
 from src.apis_agent.common.response import error, ok
-from src.apis_agent.common.streaming import make_sse
+from src.apis_agent.common.streaming import make_event, make_sse
 from src.apis_agent.config.settings import get_settings
+from src.apis_agent.gateway.model_gateway import model_gateway
+from src.apis_agent.harness.task_context import TaskStatus
+from src.apis_agent.harness.task_executor import task_executor
+from src.apis_agent.prompt.triage_prompt import parse_capability_prefix
+from src.apis_agent.service.session_service import store
+from src.apis_agent.storage.db import new_session
+from src.apis_agent.storage.models.ai_ppt_inst import PptInstRepo
 from src.apis_agent.tool.bash_tool import resolve_confirmation
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
-# ═══════════════════════════════════════════
-# Request Models
-# ═══════════════════════════════════════════
-
 class ChatRequest(BaseModel):
-    """统一对话请求。
-
-    message 支持能力前缀格式，例如:
-      - "生成ppt: 帮我做一份AI行业PPT"
-      - "深度研究: 量子计算金融应用前景"
-      - "今天天气怎么样"  (无前缀，Triage 自行分流)
-    """
-    message: str = Field(default="", min_length=0, description="用户消息，可选能力前缀")
-    query: str = Field(default="", min_length=0, description="(已废弃) 同 message，保留向后兼容")
-    conversationId: str = Field(default="", min_length=0, description="会话 ID，为空则创建新会话")
-    fileIds: list[str] = Field(default_factory=list, description="关联文件 ID 列表")
-    online: bool = Field(default=True, description="是否开启联网搜索")
-    userId: str = Field(default="", min_length=0, description="用户 ID（匿名UUID或登录token）")
+    message: str = Field(default="", min_length=0)
+    query: str = Field(default="", min_length=0, description="(已废弃)")
+    conversationId: str = Field(default="", min_length=0)
+    fileIds: list[str] = Field(default_factory=list)
+    online: bool = Field(default=True)
+    userId: str = Field(default="")
 
     def get_message(self) -> str:
         return self.message or self.query
@@ -61,9 +58,11 @@ class GatewaySwitchRequest(BaseModel):
     modelName: str = Field(..., min_length=1)
 
 
-# ═══════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════
+class FeedbackRequest(BaseModel):
+    conversationId: str = Field(..., min_length=1)
+    rating: int = Field(..., ge=-1, le=1, description="1=点赞 -1=点踩")
+    comment: str = Field(default="", max_length=500)
+
 
 def _check_query_length(query: str):
     if len(query) > get_settings().max_query_length:
@@ -71,38 +70,97 @@ def _check_query_length(query: str):
 
 
 # ═══════════════════════════════════════════
-# 统一对话入口（唯一）
+# 统一对话入口 — 使用启动时创建的单例 Agent
 # ═══════════════════════════════════════════
 
 @router.post("/chat")
-async def agent_chat(req: ChatRequest):
-    """统一对话入口 — TriageAgent 自动分流。
-
-    前端通过 message 前缀或 fileIds 参数传递能力选择：
-    - "生成ppt: ..." → Triage 优先使用 ppt_specialist
-    - "深度研究: ..." → Triage 优先使用 research_specialist
-    - fileIds 非空 → 自动注入文件分析工具
-    - 无前缀 → Triage 自行判断分流
-    """
+async def agent_chat(req: ChatRequest, request: Request):
     query = req.get_message()
     conversation_id = req.get_conversation_id()
     if not query:
         raise ValidationError("message 不能为空")
     _check_query_length(query)
 
-    from src.apis_agent.agent.triage_agent import TriageAgent
+    agent = request.app.state.agent
+    thread_id = conversation_id or str(uuid.uuid4())
+
+    # 能力前缀解析 — 注入 fileIds 上下文
+
+    _, clean_query = parse_capability_prefix(query)
+    if req.fileIds:
+        file_ctx = "\n".join(f"- fileId: {fid}" for fid in req.fileIds)
+        clean_query = f"{clean_query}\n\n用户上传的文件:\n{file_ctx}"
 
     async def event_generator():
-        agent = TriageAgent(conversation_id, query, ",".join(req.fileIds) if req.fileIds else "")
-        agent._user_id = req.userId or ""  # 注入用户ID
-        async for payload in agent.run():
-            yield payload
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "recursion_limit": 100,
+            }
+        }
 
-    return EventSourceResponse(event_generator())
+        full_answer = ""
+        try:
+            async for chunk in agent.astream_events(
+                {"messages": [{"role": "user", "content": clean_query}]},
+                version="v2",
+                config=config,
+            ):
+                kind = chunk.get("event", "")
+
+                if kind == "on_tool_start":
+                    yield make_event("tool_start", toolName=chunk.get("name", ""))
+
+                elif kind == "on_tool_end":
+                    yield make_event("tool_end", toolName=chunk.get("name", ""))
+
+                elif kind == "on_chat_model_stream":
+                    data = chunk.get("data", {})
+                    chunk_obj = data.get("chunk", "")
+                    if not chunk_obj:
+                        continue
+
+                    if hasattr(chunk_obj, "additional_kwargs") and chunk_obj.additional_kwargs:
+                        reasoning = chunk_obj.additional_kwargs.get("reasoning_content", "")
+                        if reasoning:
+                            yield make_event("thinking", content=reasoning)
+
+                    content = chunk_obj.content if hasattr(chunk_obj, "content") else ""
+                    if content:
+                        full_answer += content
+                        yield make_event("text", content=content)
+
+            # ── 保存会话 ──────────────────────────
+            try:
+                _save_session(thread_id, clean_query, full_answer, req.userId)
+            except Exception:
+                pass
+
+            # ── 首次对话生成标题 ──────────────────
+            if not req.get_conversation_id() and full_answer.strip():
+                try:
+                    title = await _generate_title(clean_query, full_answer)
+                    _update_session_title(thread_id, title)
+                except Exception:
+                    pass
+
+            yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
+            yield make_sse("[DONE]")
+
+        except Exception as e:
+            logger.error(f"Agent 异常: {e}", exc_info=True)
+            yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
+            yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
+            yield make_sse("[DONE]")
+
+    return EventSourceResponse(
+        event_generator(),
+        headers={"X-Session-Id": thread_id},
+    )
 
 
 # ═══════════════════════════════════════════
-# PPT 文件下载（保留）
+# PPT 下载 / 停止 / Shell确认 / 任务 / 网关
 # ═══════════════════════════════════════════
 
 @router.post("/pptx/download")
@@ -110,7 +168,6 @@ async def agent_pptx_download(req: StopRequest):
     from minio import Minio
     from minio.error import S3Error
 
-    from src.apis_agent.storage.models.ai_ppt_inst import PptInstRepo
 
     repo = PptInstRepo()
     inst = repo.find_by_session_id(req.conversationId)
@@ -118,29 +175,22 @@ async def agent_pptx_download(req: StopRequest):
         return error(404, "PPT文件不存在")
 
     file_url = inst.file_url
-
     if file_url.startswith("local://"):
         local_path = file_url[len("local://"):]
         if not os.path.exists(local_path):
             return error(404, "文件已被清理")
-        return FileResponse(
-            local_path, filename=os.path.basename(local_path),
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        )
+        return FileResponse(local_path, filename=os.path.basename(local_path),
+                            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
     if file_url.startswith("minio://"):
         bucket_obj = file_url[len("minio://"):]
         bucket, obj_name = bucket_obj.split("/", 1)
         try:
-            client = Minio(
-                f"{get_settings().minio_host}:{get_settings().minio_port}",
-                access_key=get_settings().minio_access_key,
-                secret_key=get_settings().minio_secret_key,
-                secure=False,
-            )
+            client = Minio(f"{get_settings().minio_host}:{get_settings().minio_port}",
+                           access_key=get_settings().minio_access_key,
+                           secret_key=get_settings().minio_secret_key, secure=False)
             from io import BytesIO
             from fastapi.responses import StreamingResponse
-
             data = client.get_object(bucket, obj_name)
             return StreamingResponse(
                 BytesIO(data.read()),
@@ -149,23 +199,13 @@ async def agent_pptx_download(req: StopRequest):
             )
         except S3Error:
             return error(404, "文件下载失败")
-
     return error(404, "无效的文件路径")
 
 
-# ═══════════════════════════════════════════
-# 停止 / Shell 确认
-# ═══════════════════════════════════════════
-
 @router.post("/stop")
 async def agent_stop(req: StopRequest):
-    event = BaseAgent._running_tasks.get(req.conversationId)
-    if event:
-        event.set()
-    await publish_stop(req.conversationId)
-    if event:
-        return ok(None, message="已发送停止信号")
-    return ok(None, message="无运行中的任务")
+    await __import__("src.apis_agent.common.redis", fromlist=["publish_stop"]).publish_stop(req.conversationId)
+    return ok(None, message="已发送停止信号")
 
 
 @router.post("/shell/confirm")
@@ -176,13 +216,8 @@ async def shell_confirm(req: ShellConfirmRequest):
     return ok(None, message="已确认" if req.approved else "已拒绝")
 
 
-# ═══════════════════════════════════════════
-# 后台任务管理
-# ═══════════════════════════════════════════
-
 @router.post("/task/status")
 async def task_status(req: TaskQueryRequest):
-    from src.apis_agent.harness.task_executor import task_executor
 
     result = task_executor.get_status(req.taskId)
     if not result:
@@ -192,8 +227,8 @@ async def task_status(req: TaskQueryRequest):
 
 @router.post("/task/stream")
 async def task_stream(req: TaskQueryRequest):
-    from src.apis_agent.harness.task_executor import task_executor
-    from src.apis_agent.harness.task_context import TaskStatus
+
+
 
     snapshot = task_executor.get_status(req.taskId)
     if not snapshot:
@@ -210,9 +245,7 @@ async def task_stream(req: TaskQueryRequest):
         elif status == TaskStatus.CANCELLED.value:
             yield make_sse(json.dumps({"type": "error", "content": "任务已取消"}, ensure_ascii=False))
         elif status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value):
-            yield make_sse(json.dumps({
-                "type": "task_status", "taskId": req.taskId, "status": status,
-            }, ensure_ascii=False))
+            yield make_sse(json.dumps({"type": "task_status", "taskId": req.taskId, "status": status}, ensure_ascii=False))
         yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
         yield make_sse("[DONE]")
 
@@ -221,7 +254,6 @@ async def task_stream(req: TaskQueryRequest):
 
 @router.post("/task/cancel")
 async def task_cancel(req: TaskQueryRequest):
-    from src.apis_agent.harness.task_executor import task_executor
 
     if task_executor.cancel(req.taskId):
         return ok(None, message="已发送取消信号")
@@ -230,27 +262,85 @@ async def task_cancel(req: TaskQueryRequest):
 
 @router.post("/task/list")
 async def task_list():
-    from src.apis_agent.harness.task_executor import task_executor
 
     return ok(task_executor.list_tasks())
 
 
-# ═══════════════════════════════════════════
-# 网关管理
-# ═══════════════════════════════════════════
-
 @router.post("/admin/gateway")
 async def gateway_status():
-    from src.apis_agent.gateway.model_gateway import model_gateway
+
     return ok(model_gateway.get_all_status())
 
 
 @router.post("/admin/gateway/switch")
 async def gateway_switch(req: GatewaySwitchRequest):
-    from src.apis_agent.gateway.model_gateway import model_gateway
 
     try:
         await model_gateway.set_active(req.modelName)
         return ok(None, message=f"已切换到 {req.modelName}")
     except ValueError as e:
         return error(400, str(e))
+
+
+# ═══════════════════════════════════════════
+# 用户反馈
+# ═══════════════════════════════════════════
+
+@router.post("/feedback")
+async def submit_feedback(req: FeedbackRequest):
+
+    db = new_session()
+    try:
+        db.execute(
+            """INSERT INTO agentx_feedback (session_id, user_id, rating, comment, created_at)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (req.conversationId, "", req.rating, req.comment, datetime.now(timezone.utc)),
+        )
+        db.commit()
+        db.close()
+        return ok(None, message="反馈已记录")
+    except Exception as e:
+        db.rollback()
+        db.close()
+        return error(500, str(e))
+
+
+# ═══════════════════════════════════════════
+# 会话保存 / 标题生成
+# ═══════════════════════════════════════════
+
+def _save_session(session_id: str, question: str, answer: str, user_id: str = ""):
+    """写 agentx_session 表。"""
+
+
+    store.save_message(
+        session_id=session_id, question=question, answer=answer,
+        user_id=user_id or "", agent_type="triage",
+    )
+
+
+def _update_session_title(session_id: str, title: str):
+    try:
+
+        db = new_session()
+        db.execute(
+            "UPDATE agentx_session SET title = %s WHERE session_id = %s",
+            (title[:40], session_id),
+        )
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+async def _generate_title(question: str, answer: str) -> str:
+    """LLM 生成对话标题。"""
+
+    llm = _create_raw_llm()
+    prompt = f"请根据以下对话生成5-15字简短标题，只输出标题: 用户:{question[:200]} 助手:{answer[:200]}"
+    try:
+        resp = await llm.ainvoke(prompt)
+        title = (resp.content if hasattr(resp, "content") else str(resp)).strip().replace("\n", "")[:15]
+        return title or "新对话"
+    except Exception:
+        return "新对话"

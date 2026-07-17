@@ -1,6 +1,6 @@
 """ExecutorAgent — 后台任务执行引擎。
 
-基于 create_react_agent，持有精简工具集（task/request_approval/read_task_journal）。
+基于 deepagents.create_deep_agent，内置 task 工具（原生 SubAgent spawn）。
 在 TaskExecutor 的后台 asyncio.Task 中运行，不继承 BaseAgent。
 """
 
@@ -8,10 +8,10 @@ import asyncio
 import json
 import logging
 
+from src.apis_agent.agent.agent_factory import _build_subagents_from_specialists
 from src.apis_agent.common.streaming import make_event, make_sse
 from src.apis_agent.harness.subagent_discovery import discover_specialists
 from src.apis_agent.prompt.executor_prompt import build_executor_prompt
-from src.apis_agent.tool import TOOL_REGISTRY
 
 logger = logging.getLogger("apis")
 
@@ -33,7 +33,7 @@ class ExecutorAgent:
 
     async def run(self):
         from src.apis_agent.agent.agent_factory import create_executor_agent
-        from src.apis_agent.gateway.model_gateway import model_gateway
+        from src.apis_agent.gateway.model_gateway import model_gateway as _gw
 
         yield {"_task_status": "running"}
 
@@ -41,27 +41,23 @@ class ExecutorAgent:
             specialists = discover_specialists()
             prompt = build_executor_prompt(specialists)
 
-            # Executor 工具：task（委托 Specialist）
-            executor_tools: list = []
-            for name in ("request_approval", "read_task_journal"):
-                if name in TOOL_REGISTRY:
-                    executor_tools.append(TOOL_REGISTRY[name])
-
             # 构建输入
             query = self.snapshot.query
             if self.plan_text:
                 query = f"执行计划：\n{self.plan_text[:1000]}\n\n原始任务：{query}"
 
+            subagents = _build_subagents_from_specialists()
             agent = await create_executor_agent(
-                tools=executor_tools,
                 system_prompt=prompt,
-                gateway=model_gateway if model_gateway._active else None,
+                gateway=_gw if _gw._active else None,
+                subagents=subagents,
             )
 
             inputs = {"messages": [("user", query)]}
 
             full_text = ""
-            async for chunk in agent.astream_events(inputs, version="v2"):
+            config = {"configurable": {"recursion_limit": 200}}
+            async for chunk in agent.astream_events(inputs, version="v2", config=config):
                 if self.cancel_event.is_set():
                     yield make_sse(json.dumps({"type": "text", "content": "\n\n[任务已取消]"}, ensure_ascii=False))
                     return

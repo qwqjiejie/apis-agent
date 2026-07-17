@@ -1,12 +1,12 @@
-"""Agent 统一工厂 — 基于 LangGraph ReAct Agent + 中间件管线。
+"""Agent 统一工厂 — 基于 deepagents.create_deep_agent + SubAgent。
 
-Triage 和 Executor 使用同一工厂函数，仅参数不同。
+Triage 和 Executor 使用同一工厂，仅参数不同。
 
-中间件管线（按执行顺序）：
-1. ToolCallLimit — 全局 + 按工具限制调用次数
-2. ToolRetry — 工具调用失败指数退避重试（最多 3 次）
-3. ModelRetry — 模型调用失败快速兜底重试（1 次）
-4. GatewayWrapper — 健康感知模型路由（网关就绪时启用）
+deepagents 内置中间件栈:
+  TodoList → Filesystem → SubAgent → Summarization → PatchToolCalls
+  → HumanInTheLoop（interrupt_on 配置时启用）
+
+SubAgent 通过 AGENT.md 声明式定义，LLM 通过内置 ``task`` 工具原生 spawn。
 """
 
 from __future__ import annotations
@@ -14,93 +14,149 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from deepagents import create_deep_agent, SubAgent
 
-from src.apis_agent.agent.middleware import (
-    ToolCallLimiter,
-    ModelRetryWrapper,
-    wrap_tool_with_limit,
-    wrap_tool_with_retry,
-)
+from src.apis_agent.common.llm import _create_raw_llm
 from src.apis_agent.config.settings import get_settings
+from src.apis_agent.harness.subagent_discovery import discover_specialists
+from src.apis_agent.tool import TOOL_REGISTRY
 
 logger = logging.getLogger("apis")
 
 
-def _build_model(gateway=None):
-    from src.apis_agent.gateway.middleware import GatewayModelWrapper
-    from src.apis_agent.gateway.types import ModelRole
+def _build_llm(gateway=None):
+    """构建 LLM，优先从网关获取。"""
 
     if gateway is not None:
-        chain = gateway.get_model_chain(ModelRole.CHAT)
+        chain = gateway.get_model_chain()
         if chain:
-            wrapper = GatewayModelWrapper(gateway=gateway, role=ModelRole.CHAT)
-            logger.info(f"[AgentFactory] 使用网关模型包装器，主模型={chain[0][0]}")
-            # 模型重试包装
-            return ModelRetryWrapper(wrapper)
+            _, model = chain[0]
+            logger.info(f"[AgentFactory] 网关模型: {chain[0][0]}")
+            return model
 
-    from src.apis_agent.common.llm import _create_raw_llm
-    logger.info("[AgentFactory] 网关未就绪，使用原始 LLM")
-    return ModelRetryWrapper(_create_raw_llm())
+    llm = _create_raw_llm()
+    model_name = get_settings().llm_model
+    if gateway is not None:
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(gateway.register(model_name, llm, is_primary=True))
+        except RuntimeError:
+            pass
+    logger.info(f"[AgentFactory] 原始 LLM: {model_name}")
+    return llm
 
 
-def _apply_tool_middleware(tools: list) -> list:
-    """对工具列表应用中间件包装：ToolRetry + ToolCallLimit。"""
-    limiter = ToolCallLimiter(run_limit=50, thread_limit=50)
-    wrapped = []
-    for tool in tools:
-        tool = wrap_tool_with_retry(tool, max_retries=3, backoff_factor=2.0, initial_delay=1.0)
-        tool = wrap_tool_with_limit(tool, limiter)
-        wrapped.append(tool)
-    logger.info(f"[AgentFactory] 工具中间件已应用: {len(wrapped)} 个工具")
-    return wrapped
+def _build_subagents_from_specialists() -> list[SubAgent]:
+    """从 agent/specialist/ 扫描 AGENT.md，构建 SubAgent 列表。
+
+    每个 SubAgent 拥有独立的 system_prompt 和 allowed_tools。
+    LLM 通过 deepagents 内置的 ``task`` 工具原生 spawn 子代理。
+    """
+
+
+
+    specialists = discover_specialists()
+    subagents: list[SubAgent] = []
+
+    for spec in specialists:
+        name = spec["name"]
+        allowed_names = spec.get("allowed_tools", [])
+        # 按名从 TOOL_REGISTRY 取工具对象
+        tools = [TOOL_REGISTRY[n] for n in allowed_names if n in TOOL_REGISTRY]
+
+        sub: SubAgent = {
+            "name": name,
+            "description": spec.get("description", f"Specialist: {name}"),
+            "system_prompt": spec.get("system_prompt", ""),
+            "tools": tools,
+        }
+        subagents.append(sub)
+        logger.info(f"[AgentFactory] SubAgent: {name} (tools={[t.name if hasattr(t, 'name') else str(t) for t in tools]})")
+
+    return subagents
+
+
+def _build_external_tools() -> list:
+    """构建额外工具列表（deepagents 内置工具之外的工具）。
+
+    排除与 deepagents 内置工具重复的文件系统工具和 grep。
+    """
+
+
+    # deepagents 已内置: ls, read_file, write_file, edit_file, glob, grep, execute
+    _builtin = {"write_file", "edit_file", "glob_files", "grep_tool", "bash_tool"}
+
+    tools = []
+    for name, t in TOOL_REGISTRY.items():
+        if name not in _builtin:
+            tools.append(t)
+    return tools
 
 
 async def create_triage_agent(
-    tools: list,
     system_prompt: str,
-    checkpointer: AsyncPostgresSaver | None = None,
-    store: Any = None,
-    subagents: list[dict] | None = None,
     gateway=None,
+    subagents: list[SubAgent] | None = None,
+    checkpointer=None,
+    store=None,
+    extra_tools: list | None = None,
 ):
-    model = _build_model(gateway)
-    wrapped_tools = _apply_tool_middleware(tools)
-    subagents = subagents or []
+    """创建 Triage DeepAgent — 统一入口分流。
 
-    agent = create_react_agent(
+    Triage 持有额外工具（搜索、任务管理），LLM 自行分流：
+    简单问题 → 直接调用工具或 spawn 一个 Specialist
+    复杂任务 → create_background_task 后台执行
+    """
+    model = _build_llm(gateway)
+    subagents = subagents or _build_subagents_from_specialists()
+    tools = extra_tools or _build_external_tools()
+
+    agent = create_deep_agent(
         model=model,
-        tools=wrapped_tools,
-        prompt=system_prompt,
-        checkpointer=checkpointer,
-        store=store,
-    )
-    logger.info(f"[AgentFactory] TriageAgent 创建完成 (tools={len(wrapped_tools)}, subagents={len(subagents)})")
-    return agent
-
-
-async def create_executor_agent(
-    tools: list,
-    system_prompt: str,
-    checkpointer: AsyncPostgresSaver | None = None,
-    store: Any = None,
-    subagents: list[dict] | None = None,
-    gateway=None,
-    interrupt_on: dict | None = None,
-):
-    model = _build_model(gateway)
-    wrapped_tools = _apply_tool_middleware(tools)
-    subagents = subagents or []
-
-    agent = create_react_agent(
-        model=model,
-        tools=wrapped_tools,
-        prompt=system_prompt,
+        tools=tools,
+        system_prompt=system_prompt,
+        subagents=subagents,
         checkpointer=checkpointer,
         store=store,
     )
     logger.info(
-        f"[AgentFactory] ExecutorAgent 创建完成 (tools={len(wrapped_tools)}, subagents={len(subagents)})"
+        f"[AgentFactory] Triage DeepAgent 创建完成 (tools={len(tools)}, subagents={len(subagents)})"
+    )
+    return agent
+
+
+async def create_executor_agent(
+    system_prompt: str,
+    gateway=None,
+    subagents: list[SubAgent] | None = None,
+    checkpointer=None,
+    store=None,
+    interrupt_on: dict | None = None,
+):
+    """创建 Executor DeepAgent — 后台任务执行。
+
+    Executor 工具精简（仅 task + request_approval），专注编排而非执行。
+    """
+    model = _build_llm(gateway)
+    subagents = subagents or _build_subagents_from_specialists()
+
+    executor_tools: list = []
+
+    for name in ("request_approval", "read_task_journal"):
+        if name in TOOL_REGISTRY:
+            executor_tools.append(TOOL_REGISTRY[name])
+
+    agent = create_deep_agent(
+        model=model,
+        tools=executor_tools,
+        system_prompt=system_prompt,
+        subagents=subagents,
+        checkpointer=checkpointer,
+        store=store,
+        interrupt_on=interrupt_on,
+    )
+    logger.info(
+        f"[AgentFactory] Executor DeepAgent 创建完成 (tools={len(executor_tools)}, subagents={len(subagents)})"
     )
     return agent

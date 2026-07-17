@@ -11,16 +11,16 @@ import json
 import logging
 
 from src.apis_agent.agent.base_agent import BaseAgent
+from src.apis_agent.agent.agent_factory import _build_subagents_from_specialists, create_triage_agent
 from src.apis_agent.common.streaming import AgentStopped, make_event, make_sse
+from src.apis_agent.gateway.model_gateway import model_gateway
 from src.apis_agent.harness.subagent_discovery import discover_specialists
 from src.apis_agent.harness.task_executor import task_executor
+from src.apis_agent.memory.semantic_memory import semantic_memory
 from src.apis_agent.prompt.triage_prompt import build_triage_prompt, parse_capability_prefix
-from src.apis_agent.tool import TOOL_REGISTRY
 from src.apis_agent.tool.tool_search import register_deferred
 
 logger = logging.getLogger("apis")
-
-# 注册延迟工具 — 不在 system prompt 中展示，LLM 通过 tool_search 发现
 register_deferred(
     "listTables", "describeTables", "validateSql", "executeSql",
     "lookupGlossary", "TimeTool",
@@ -39,8 +39,8 @@ class TriageAgent(BaseAgent):
         self._delegated_task_id: str | None = None
 
     async def run(self):
-        from src.apis_agent.agent.agent_factory import create_triage_agent
-        from src.apis_agent.gateway.model_gateway import model_gateway
+
+
 
         ok, error_events = await self._try_start()
         if not ok:
@@ -52,15 +52,12 @@ class TriageAgent(BaseAgent):
         hinted_specialist, clean_query = parse_capability_prefix(self.query)
 
         specialists = discover_specialists()
-        prompt = build_triage_prompt(specialists)
-
-        # 能力前缀高优提示
         if hinted_specialist:
-            prompt += f"\n\n## 当前能力提示\n用户已选择「{hinted_specialist}」能力，请优先使用 ``task`` 工具委托给 ``{hinted_specialist}`` 处理。"
             self.query = clean_query
+        prompt = build_triage_prompt(specialists, hinted_specialist=hinted_specialist or "")
 
         # 检索语义长期记忆
-        from src.apis_agent.memory.semantic_memory import semantic_memory
+
         memory_context = ""
         try:
             memories = await semantic_memory.search("default", clean_query)
@@ -68,25 +65,29 @@ class TriageAgent(BaseAgent):
         except Exception:
             pass
 
-        tools = list(TOOL_REGISTRY.values())
         tools_used: set[str] = set()
         references: list[dict] = []
         full_text = ""
         start_time = __import__("time").monotonic()
-        first_response_time = 0
         trace_config = self._build_trace_config("triage")
 
         try:
             messages = await self._load_messages()
             if memory_context:
                 messages.insert(0, ("system", memory_context))
+
+            subagents = _build_subagents_from_specialists()
             agent = await create_triage_agent(
-                tools=tools,
                 system_prompt=prompt,
                 gateway=model_gateway if model_gateway._active else None,
+                subagents=subagents,
             )
 
             inputs = {"messages": messages}
+            if not trace_config:
+                trace_config = {}
+            trace_config.setdefault("configurable", {})
+            trace_config["configurable"]["recursion_limit"] = 100
 
             async for chunk in agent.astream_events(inputs, version="v2", config=trace_config):
                 if self.cancel_event.is_set():

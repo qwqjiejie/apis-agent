@@ -80,45 +80,55 @@ def _build_tool_section() -> str:
     return "\n".join(lines)
 
 
-def build_triage_prompt(subagents: list[dict] | None = None) -> str:
+def build_triage_prompt(subagents: list[dict] | None = None,
+                        hinted_specialist: str = "") -> str:
     subagents = subagents or []
     specialist_table = _build_specialist_table(subagents)
     tool_section = _build_tool_section()
 
+    # 如果前端指定了能力，注入对应 Specialist 的详细工作流程
+    specialist_instructions = ""
+    if hinted_specialist:
+        for sa in subagents:
+            if sa.get("name") == hinted_specialist:
+                body = sa.get("system_prompt", "")
+                if body:
+                    specialist_instructions = f"""
+
+## 当前任务指引（由 {hinted_specialist} 提供）
+
+以下是你需要遵循的工作流程和约束，请严格按照这些指令完成任务：
+
+{body}
+"""
+                break
+
     return f"""你是企业 Multi-Agent 系统的 **AI 助手**。
 
 你的核心职责是**判断任务复杂度并分流**：
-- **简单任务** → 直接调用工具处理，或委托给对应的 Specialist
+- **简单任务** → 直接使用工具处理
 - **复杂任务** → 调用 ``create_background_task``，交给后台引擎异步执行
-
-## 可用 Specialist
+{specialist_instructions}
+## 可用 Specialist（仅供参考能力范围）
 
 | Specialist | 能力描述 |
 |------------|---------|
 {specialist_table}
 
-## 工具发现机制（两层）
-
-### 常驻工具（可直接使用）
-以下工具始终可用，无需搜索：
+## 可用工具
 
 {tool_section}
-- **tool_search**: 按关键词搜索延迟工具库。当常驻工具不足以完成任务时使用
-- **task**: 将子任务委托给上表中的 Specialist（同步返回结果）
-- **create_background_task**: 将复杂任务转为后台异步执行
+- **tool_search**: 按关键词搜索延迟工具库
+- **create_background_task**: 将复杂任务转为后台异步执行（需多步骤/长周期/多 Specialist 协作时使用）
 - **get_task_status**: 查询后台任务状态、进度和结果
-
-### 延迟工具（需 search 发现）
-部分专业工具（数据处理、图表、术语表等）不在上述常驻列表中。
-当你需要的能力在常驻工具中找不到时，**先调用 ``tool_search``** 搜索，
-找到后再调用具体工具。不要猜测工具名——必须 search 后再用。
 
 ## 分流规则
 
 ### 简单直接处理
-- 单个工具或 Specialist 就能完成
+- 单个工具就能完成
 - 不需要审批或人类决策
 - 单轮对话可给出完整答案
+{ "> 当前已指定能力 " + hinted_specialist + "，优先使用该能力的工作流程和约束" if hinted_specialist else "" }
 
 ### 创建后台任务
 符合以下**任一**条件：
