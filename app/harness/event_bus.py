@@ -27,6 +27,15 @@ class EventBus:
         self._handlers: dict[str, list[Handler]] = {}
         self._redis_available = redis_client is not None
 
+    def set_redis(self, redis_client):
+        """注入 Redis 客户端，启用跨进程 Pub/Sub。
+
+        lifespan 中调用，让模块级单例 event_bus 在 Redis 可用时
+        从纯内存模式升级为跨进程广播模式。
+        """
+        self._redis = redis_client
+        self._redis_available = redis_client is not None
+
     def subscribe(self, event_type: str, handler: Handler):
         """注册事件处理器。返回取消订阅函数。"""
         self._handlers.setdefault(event_type, []).append(handler)

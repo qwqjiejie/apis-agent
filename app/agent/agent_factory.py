@@ -15,6 +15,12 @@ import logging
 from typing import Any
 
 from deepagents import create_deep_agent, SubAgent
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    ModelRetryMiddleware,
+    ToolCallLimitMiddleware,
+    ToolRetryMiddleware,
+)
 
 from app.common.llm import _create_raw_llm
 from app.config.settings import get_settings
@@ -94,6 +100,31 @@ def _build_external_tools() -> list:
     return tools
 
 
+def _build_middleware(*, model_run_limit: int = 15, tool_run_limit: int = 50,
+                      tool_thread_limit: int = 50) -> list:
+    """构建领域定制中间件栈。
+
+    接入 deepagents create_deep_agent 的 middleware 参数，使以下能力在
+    Agent 链路真正生效（之前 self.agent 未传 middleware，重试/限流为死代码）：
+
+    - ModelCallLimitMiddleware: 单次请求/会话模型调用上限，防止死循环
+    - ModelRetryMiddleware: 模型调用失败快速重试（指数退避）
+    - ToolCallLimitMiddleware: 全局 + 按工具调用次数限制
+    - ToolRetryMiddleware: 工具调用失败指数退避重试
+
+    Args:
+        model_run_limit: 单次请求模型调用上限（triage 较紧，executor 宽松）
+        tool_run_limit: 单工具单次请求调用上限
+        tool_thread_limit: 单工具整会话调用上限
+    """
+    return [
+        ModelCallLimitMiddleware(run_limit=model_run_limit, exit_behavior="end"),
+        ModelRetryMiddleware(max_retries=1, backoff_factor=1.0, initial_delay=0.5),
+        ToolCallLimitMiddleware(thread_limit=tool_thread_limit, run_limit=tool_run_limit),
+        ToolRetryMiddleware(max_retries=3, backoff_factor=2.0, initial_delay=1.0),
+    ]
+
+
 async def create_triage_agent(
     system_prompt: str,
     gateway=None,
@@ -101,6 +132,7 @@ async def create_triage_agent(
     checkpointer=None,
     store=None,
     extra_tools: list | None = None,
+    middleware: list | None = None,
 ):
     """创建 Triage DeepAgent — 统一入口分流。
 
@@ -111,17 +143,20 @@ async def create_triage_agent(
     model = _build_llm(gateway)
     subagents = subagents or _build_subagents_from_specialists()
     tools = extra_tools or _build_external_tools()
+    # triage 面向单轮交互，限流较紧
+    mw = middleware if middleware is not None else _build_middleware(model_run_limit=15)
 
     agent = create_deep_agent(
         model=model,
         tools=tools,
         system_prompt=system_prompt,
         subagents=subagents,
+        middleware=mw,
         checkpointer=checkpointer,
         store=store,
     )
     logger.info(
-        f"[AgentFactory] Triage DeepAgent 创建完成 (tools={len(tools)}, subagents={len(subagents)})"
+        f"[AgentFactory] Triage DeepAgent 创建完成 (tools={len(tools)}, subagents={len(subagents)}, middleware={len(mw)})"
     )
     return agent
 
@@ -133,6 +168,9 @@ async def create_executor_agent(
     checkpointer=None,
     store=None,
     interrupt_on: dict | None = None,
+    middleware: list | None = None,
+    *,
+    is_background: bool = False,
 ):
     """创建 Executor DeepAgent — 后台任务执行。
 
@@ -147,16 +185,21 @@ async def create_executor_agent(
         if name in TOOL_REGISTRY:
             executor_tools.append(TOOL_REGISTRY[name])
 
+    # executor 面向长任务编排，限流宽松；后台运行时进一步放宽
+    _run_limit = 200 if is_background else 15
+    mw = middleware if middleware is not None else _build_middleware(model_run_limit=_run_limit)
+
     agent = create_deep_agent(
         model=model,
         tools=executor_tools,
         system_prompt=system_prompt,
         subagents=subagents,
+        middleware=mw,
         checkpointer=checkpointer,
         store=store,
         interrupt_on=interrupt_on,
     )
     logger.info(
-        f"[AgentFactory] Executor DeepAgent 创建完成 (tools={len(executor_tools)}, subagents={len(subagents)})"
+        f"[AgentFactory] Executor DeepAgent 创建完成 (tools={len(executor_tools)}, subagents={len(subagents)}, middleware={len(mw)})"
     )
     return agent

@@ -67,7 +67,9 @@ class TestSessionDelete:
 
 class TestSessionWithData:
     def test_session_lifecycle(self):
-        create_resp = client.post(f"{API}/session")
+        headers = {"X-Anonymous-Id": "session-lifecycle-test"}
+        user_id = "anon_session-lifecycle-test"
+        create_resp = client.post(f"{API}/session", headers=headers)
         cid = create_resp.json()["data"]["conversationId"]
 
         store.save_message(
@@ -75,19 +77,36 @@ class TestSessionWithData:
             question="测试问题",
             answer="测试回答",
             agent_type="chat",
+            user_id=user_id,
         )
 
-        resp = client.post(f"{API}/session/detail", json={"conversationId": cid})
+        resp = client.post(
+            f"{API}/session/detail",
+            json={"conversationId": cid},
+            headers=headers,
+        )
         assert resp.json()["code"] == 200
         assert resp.json()["data"]["conversationId"] == cid
 
-        list_resp = client.post(f"{API}/session/list", json={"pageNum": 1, "pageSize": 100})
+        list_resp = client.post(
+            f"{API}/session/list",
+            json={"pageNum": 1, "pageSize": 100},
+            headers=headers,
+        )
         records = list_resp.json()["data"]["records"]
         cids = [r["conversationId"] for r in records]
         assert cid in cids
 
-        del_resp = client.post(f"{API}/session/delete", json={"conversationId": cid})
+        del_resp = client.post(
+            f"{API}/session/delete",
+            json={"conversationId": cid},
+            headers=headers,
+        )
         assert del_resp.json()["code"] == 200
 
-        get_resp = client.post(f"{API}/session/detail", json={"conversationId": cid})
+        get_resp = client.post(
+            f"{API}/session/detail",
+            json={"conversationId": cid},
+            headers=headers,
+        )
         assert get_resp.json()["code"] == 404

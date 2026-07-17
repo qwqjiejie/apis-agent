@@ -1,0 +1,249 @@
+import asyncio
+import json
+import re
+import time
+from types import SimpleNamespace
+from typing import TypedDict
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
+
+from app.agent.executor_agent import ExecutorAgent
+from app.api.routes import agent as agent_routes
+from app.harness.event_bus import EventBus
+from app.harness.task_context import PgTaskStore, TaskSnapshot, TaskStatus
+from app.harness import task_executor as task_executor_module
+from app.harness.task_executor import TaskExecutor
+from app.tool.task_tools import create_background_task
+
+
+class FakeLangGraphStore:
+    def __init__(self):
+        self.data = {}
+
+    async def aput(self, namespace, key, value, index=None):
+        self.data[(namespace, key)] = value
+
+    async def aget(self, namespace, key, **kwargs):
+        value = self.data.get((namespace, key))
+        return SimpleNamespace(value=value) if value is not None else None
+
+    async def asearch(self, namespace, *, filter=None, limit=10, **kwargs):
+        values = [
+            value
+            for (item_namespace, _), value in self.data.items()
+            if item_namespace[:len(namespace)] == namespace
+        ]
+        if filter:
+            values = [
+                value
+                for value in values
+                if all(value.get(key) == expected for key, expected in filter.items())
+            ]
+        return [SimpleNamespace(value=value) for value in values[:limit]]
+
+    async def adelete(self, namespace, key):
+        self.data.pop((namespace, key), None)
+
+
+class BlockingExecutorGraph:
+    async def astream_events(self, inputs, *, version, config):
+        await asyncio.Event().wait()
+        if False:
+            yield inputs, version, config
+
+
+class BackgroundTaskTriageAgent:
+    async def astream_events(self, inputs, *, version, config):
+        yield {"event": "on_tool_start", "name": "create_background_task"}
+        result = await create_background_task.ainvoke({
+            "goal": "生成跨部门研究报告",
+            "plan": "检索、分析、汇总",
+        })
+        yield {"event": "on_tool_end", "name": "create_background_task"}
+        yield {
+            "event": "on_chat_model_stream",
+            "data": {
+                "chunk": SimpleNamespace(content=result, additional_kwargs={}),
+            },
+        }
+
+
+@pytest.mark.asyncio
+async def test_pg_task_store_persists_across_repository_instances():
+    backend = FakeLangGraphStore()
+    writer = PgTaskStore(backend)
+    reader = PgTaskStore(backend)
+    snapshot = TaskSnapshot(
+        task_id="task_pg_roundtrip",
+        conversation_id="session_pg",
+        query="持久化任务",
+        status=TaskStatus.EXECUTING,
+    )
+
+    await writer.save(snapshot)
+
+    loaded = await reader.get(snapshot.task_id)
+    assert loaded is not None
+    assert loaded.to_dict() == snapshot.to_dict()
+    assert [task.task_id for task in await reader.list_by_status(TaskStatus.EXECUTING)] == [snapshot.task_id]
+    assert [task.task_id for task in await reader.list_by_session("session_pg")] == [snapshot.task_id]
+
+    await reader.delete(snapshot.task_id)
+    assert await writer.get(snapshot.task_id) is None
+
+
+@pytest.mark.asyncio
+async def test_v2_background_task_is_queryable_and_persisted():
+    backend = FakeLangGraphStore()
+    repository = PgTaskStore(backend)
+    executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute(_snapshot):
+        started.set()
+        await release.wait()
+        yield {
+            "event": "message",
+            "data": json.dumps({"type": "text", "content": "后台任务完成"}, ensure_ascii=False),
+        }
+
+    task_id = await executor.submit("session_v2", "复杂任务", execute)
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    executing = await executor.get_status(task_id)
+    assert executing is not None
+    assert executing["status"] == TaskStatus.EXECUTING.value
+
+    release.set()
+    for _ in range(100):
+        completed = await executor.get_status(task_id)
+        if completed and completed["status"] == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("后台任务未在预期时间内完成")
+
+    assert completed["result"] == "后台任务完成"
+    persisted = await PgTaskStore(backend).get(task_id)
+    assert persisted is not None
+    assert persisted.status == TaskStatus.COMPLETED
+    assert persisted.result == "后台任务完成"
+
+
+@pytest.mark.asyncio
+async def test_v3_langgraph_interrupt_is_persisted_as_waiting_human(monkeypatch):
+    class ApprovalState(TypedDict):
+        messages: list
+
+    def request_approval(state):
+        interrupt({
+            "action_requests": [{
+                "name": "request_approval",
+                "args": {
+                    "approval_id": "approval_v3",
+                    "description": "批准发布报告",
+                },
+                "description": "批准发布报告",
+            }],
+            "review_configs": [{
+                "action_name": "request_approval",
+                "allowed_decisions": ["approve", "reject"],
+            }],
+        })
+        return {"messages": state["messages"]}
+
+    builder = StateGraph(ApprovalState)
+    builder.add_node("request_approval", request_approval)
+    builder.add_edge(START, "request_approval")
+    builder.add_edge("request_approval", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+
+    backend = FakeLangGraphStore()
+    repository = PgTaskStore(backend)
+    executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
+    executor.executor_agent = graph
+    monkeypatch.setattr(task_executor_module, "task_executor", executor)
+
+    async def execute(snapshot):
+        wrapper = ExecutorAgent(snapshot)
+        async for event in wrapper.run():
+            yield event
+
+    task_id = await executor.submit("session_v3", "需要审批的任务", execute)
+
+    for _ in range(100):
+        waiting = await executor.get_status(task_id)
+        if waiting and waiting["status"] == TaskStatus.WAITING_HUMAN.value:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("LangGraph interrupt 未持久化为 waiting_human")
+
+    assert waiting["approvalId"] == "approval_v3"
+    assert waiting["interruptInfo"]["action_requests"][0]["name"] == "request_approval"
+    persisted = await PgTaskStore(backend).get(task_id)
+    assert persisted is not None
+    assert persisted.status == TaskStatus.WAITING_HUMAN
+    assert persisted.approval_id == "approval_v3"
+    assert persisted.interrupt_info is not None
+    assert persisted.interrupt_info["action_requests"][0]["name"] == "request_approval"
+    assert persisted.interrupt_info["interrupts"][0]["id"]
+
+
+def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
+    repository = PgTaskStore(FakeLangGraphStore())
+    executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
+    executor.executor_agent = BlockingExecutorGraph()
+    monkeypatch.setattr(task_executor_module, "task_executor", executor)
+    monkeypatch.setattr(agent_routes, "task_executor", executor)
+
+    test_app = FastAPI()
+    test_app.include_router(agent_routes.router, prefix="/api/v1")
+    test_app.state.agent = BackgroundTaskTriageAgent()
+
+    monkeypatch.setattr(agent_routes, "_save_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="研究报告"))
+    monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
+    monkeypatch.setattr(agent_routes.semantic_memory, "search", AsyncMock(return_value=[]))
+    monkeypatch.setattr(agent_routes.semantic_memory, "add", AsyncMock())
+    monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
+
+    with TestClient(test_app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={"message": "请完成一份需要多个专家协作的复杂研究报告"},
+            headers={"X-Anonymous-Id": "v2-test-user"},
+        )
+        match = re.search(r"task_[0-9a-f]{12}", response.text)
+        assert match is not None
+        task_id = match.group()
+
+        status_response = client.post(
+            "/api/v1/agent/task/status",
+            json={"taskId": task_id},
+        )
+        assert status_response.json()["data"]["status"] == TaskStatus.EXECUTING.value
+
+        cancel_response = client.post(
+            "/api/v1/agent/task/cancel",
+            json={"taskId": task_id},
+        )
+        assert cancel_response.json()["code"] == 200
+
+        for _ in range(100):
+            status_response = client.post(
+                "/api/v1/agent/task/status",
+                json={"taskId": task_id},
+            )
+            if status_response.json()["data"]["status"] == TaskStatus.CANCELLED.value:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("后台任务取消状态未持久化")

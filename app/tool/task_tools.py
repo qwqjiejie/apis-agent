@@ -4,12 +4,17 @@
 """
 
 import logging
+from contextvars import ContextVar
 
 from langchain_core.tools import tool
 
 from app.tool.registry import register_tool
 
 logger = logging.getLogger("apis")
+
+# 当前会话 id 的上下文变量：/chat event_generator 中设置，
+# create_background_task 读取以将后台任务关联到真实会话（而非硬编码 "bg"）
+current_session_id: ContextVar[str] = ContextVar("current_session_id", default="")
 
 
 @register_tool
@@ -31,13 +36,15 @@ async def create_background_task(goal: str, plan: str = "") -> str:
         query = f"{goal}\n\n执行计划: {plan}"
 
     # 提交后台任务
+    conv = current_session_id.get() or "bg"
+
     async def _execute(snapshot):
         from app.agent.executor_agent import ExecutorAgent
         executor = ExecutorAgent(snapshot, plan)
         async for event in executor.run():
             yield event
 
-    task_id = await task_executor.submit("bg", query, _execute)
+    task_id = await task_executor.submit(conv, query, _execute)
     return f"任务已创建。任务编号: {task_id}\n目标: {goal}\n状态: 后台执行中，可随时查询进度。"
 
 
@@ -52,7 +59,7 @@ async def get_task_status(task_id: str = "") -> str:
     from app.harness.task_executor import task_executor
 
     if task_id:
-        status = task_executor.get_status(task_id)
+        status = await task_executor.get_status(task_id)
         if not status:
             return f"任务 '{task_id}' 不存在"
         return (
@@ -63,7 +70,7 @@ async def get_task_status(task_id: str = "") -> str:
             f"错误: {status.get('error', '') or '无'}"
         )
 
-    tasks = task_executor.list_tasks()
+    tasks = await task_executor.list_tasks()
     if not tasks:
         return "当前无后台任务"
     lines = ["当前任务列表:"]

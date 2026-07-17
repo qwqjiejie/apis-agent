@@ -54,6 +54,28 @@ class Store(BaseStore):
             ],
         }
 
+    def get_session_owner(self, session_id: str) -> str:
+        """返回会话归属用户 ID（取最新一条消息的 user_id）。"""
+        rows = self._repo().find_by_session_id(session_id, limit=1)
+        if not rows:
+            return ""
+        return rows[-1].user_id or ""
+
+    def touch_last_active(self, session_id: str):
+        """更新会话最后活跃时间（当前表结构为更新该 session 所有行的 updated_at）。"""
+        from app.storage.db import new_session
+        db = new_session()
+        try:
+            db.execute(
+                "UPDATE agentx_session SET updated_at = %s WHERE session_id = %s",
+                (datetime.now(timezone.utc), session_id),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
     def delete_session(self, session_id: str) -> bool:
         from app.storage.models.ai_ppt_inst import PptInstRepo
         ppt_repo = PptInstRepo()

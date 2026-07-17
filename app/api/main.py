@@ -93,6 +93,8 @@ async def lifespan(app: FastAPI):
 
     # ── 2. PG Store (checkpointer + store) ─────────
     from app.stores.pg_store import pg_store_manager
+    app.state.checkpointer = None
+    app.state.store = None
     if await pg_store_manager.initialize():
         app.state.checkpointer = pg_store_manager.checkpointer
         app.state.store = pg_store_manager.store
@@ -142,7 +144,18 @@ async def lifespan(app: FastAPI):
 
     # ── 6. TaskExecutor（注入 executor_agent）────────
     from app.harness.task_executor import task_executor
-    task_executor.executor_agent = app.state.executor_agent
+    from app.harness.task_context import MemoryTaskStore, PgTaskStore
+    if getattr(app.state, "store", None) is not None:
+        task_repository = PgTaskStore(app.state.store)
+        logger.info("[main] TaskExecutor 使用 PostgreSQL 持久化仓储")
+    else:
+        task_repository = MemoryTaskStore()
+        logger.warning("[main] PG Store 不可用，TaskExecutor 降级为内存仓储")
+    task_executor.configure(
+        store=task_repository,
+        executor_agent=app.state.executor_agent,
+    )
+    app.state.task_executor = task_executor
 
     # ── 7. SkillManager ─────────────────────────────
     from app.skill.skill_manager import skill_manager
@@ -160,8 +173,15 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Neo4j 初始化跳过: {e}")
 
     # ── 9. 事件总线 ─────────────────────────────────
-    from app.harness.event_bus import EventBus
-    app.state.event_bus = EventBus()
+    from app.harness.event_bus import event_bus
+    from app.common.redis import get_redis
+    app.state.event_bus = event_bus  # 与 task_executor 引用的同一单例
+    try:
+        redis_client = await get_redis()
+        event_bus.set_redis(redis_client)
+        logger.info("[main] EventBus 已接入 Redis Pub/Sub")
+    except Exception as e:
+        logger.warning(f"[main] Redis 不可用，EventBus 降级为纯内存模式: {e}")
 
     # ── 10. 死信扫描 ────────────────────────────────
     from app.harness.dead_letter import dead_letter_queue
@@ -181,11 +201,15 @@ async def lifespan(app: FastAPI):
     await sa_reloader.start()
     app.state.subagent_hot_reloader = sa_reloader
 
+    # ── 13. 恢复后台任务 ────────────────────────────
+    await task_executor.recover_tasks()
+
     logger.info("[main] 启动完成")
 
     yield
 
     # ── 优雅关闭 ────────────────────────────────────
+    await task_executor.shutdown()
     await hot_reloader.stop()
     await sa_reloader.stop()
     await dead_letter_queue.stop_scanner()

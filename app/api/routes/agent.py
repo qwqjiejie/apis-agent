@@ -12,13 +12,17 @@ from app.common.exceptions import QueryTooLongError, ValidationError
 from app.common.llm import _create_raw_llm
 from app.common.logger import logger
 from app.common.response import error, ok
-from app.common.streaming import make_event, make_sse
+from app.common.streaming import extract_text_content, make_event, make_sse
 from app.config.settings import get_settings
 from app.gateway.model_gateway import model_gateway
 from app.harness.task_context import TaskStatus
 from app.harness.task_executor import task_executor
 from app.prompt.triage_prompt import parse_capability_prefix
+from app.memory.semantic_memory import semantic_memory
+from app.evaluation.online_eval import EvalRecord, online_eval
+from app.auth import get_current_user_id
 from app.service.session_service import store
+from app.tool.task_tools import current_session_id
 from app.storage.db import new_session
 from app.storage.models.ai_ppt_inst import PptInstRepo
 from app.tool.bash_tool import resolve_confirmation
@@ -54,6 +58,12 @@ class TaskQueryRequest(BaseModel):
     taskId: str = Field(..., min_length=1)
 
 
+class TaskResumeRequest(BaseModel):
+    taskId: str = Field(..., min_length=1)
+    action: str = Field(default="approved", description="approved=通过 rejected=拒绝")
+    comment: str = Field(default="", max_length=500)
+
+
 class GatewaySwitchRequest(BaseModel):
     modelName: str = Field(..., min_length=1)
 
@@ -81,8 +91,19 @@ async def agent_chat(req: ChatRequest, request: Request):
         raise ValidationError("message 不能为空")
     _check_query_length(query)
 
+    # ── 认证 + session 归属校验 ────────────────────
+    user_id = get_current_user_id(request)
     agent = request.app.state.agent
     thread_id = conversation_id or str(uuid.uuid4())
+
+    if conversation_id:
+        owner = store.get_session_owner(conversation_id)
+        if owner and owner != user_id:
+            return error(403, "无权访问该会话")
+        try:
+            store.touch_last_active(conversation_id)
+        except Exception:
+            pass
 
     # 能力前缀解析 — 注入 fileIds 上下文
 
@@ -92,24 +113,60 @@ async def agent_chat(req: ChatRequest, request: Request):
         clean_query = f"{clean_query}\n\n用户上传的文件:\n{file_ctx}"
 
     async def event_generator():
+        # 设置会话上下文，供 create_background_task 关联真实会话
+        current_session_id.set(thread_id)
+
+        # ── 语义长期记忆注入（从 TriageAgent 封装下沉）──────────
+        memory_context = ""
+        try:
+            memories = await semantic_memory.search("default", clean_query)
+            memory_context = semantic_memory.build_context_injection(memories)
+        except Exception:
+            pass
+
+        # ── 注入已完成的后台任务结果 ──────────────────────
+        final_query = clean_query
+        try:
+            done_tasks = await task_executor.list_tasks_by_session(thread_id)
+            completed = [t for t in done_tasks
+                         if t.get("status") == "completed" and t.get("result")]
+            if completed:
+                ctx_lines = [
+                    f"[已完成后台任务 {t['taskId']}] {t.get('result', '')[:300]}"
+                    for t in completed[-5:]
+                ]
+                final_query = clean_query + "\n\n[历史后台任务产出]\n" + "\n".join(ctx_lines)
+        except Exception:
+            pass
+
+        messages = [{"role": "user", "content": final_query}]
+        if memory_context:
+            messages.insert(0, {"role": "system", "content": memory_context})
+
         config = {
+            "recursion_limit": 100,
             "configurable": {
                 "thread_id": thread_id,
-                "recursion_limit": 100,
+                "user_id": user_id,
+                "session_id": thread_id,
             }
         }
 
         full_answer = ""
+        tools_used: set[str] = set()
+        start_time = __import__("time").monotonic()
         try:
             async for chunk in agent.astream_events(
-                {"messages": [{"role": "user", "content": clean_query}]},
+                {"messages": messages},
                 version="v2",
                 config=config,
             ):
                 kind = chunk.get("event", "")
 
                 if kind == "on_tool_start":
-                    yield make_event("tool_start", toolName=chunk.get("name", ""))
+                    tool_name = chunk.get("name", "")
+                    tools_used.add(tool_name)
+                    yield make_event("tool_start", toolName=tool_name)
 
                 elif kind == "on_tool_end":
                     yield make_event("tool_end", toolName=chunk.get("name", ""))
@@ -125,18 +182,45 @@ async def agent_chat(req: ChatRequest, request: Request):
                         if reasoning:
                             yield make_event("thinking", content=reasoning)
 
-                    content = chunk_obj.content if hasattr(chunk_obj, "content") else ""
+                    content = extract_text_content(
+                        chunk_obj.content if hasattr(chunk_obj, "content") else ""
+                    )
                     if content:
                         full_answer += content
                         yield make_event("text", content=content)
 
-            # ── 保存会话 ──────────────────────────
+            # ── 保存会话（含工具列表）──────────────
             try:
-                _save_session(thread_id, clean_query, full_answer, req.userId)
+                _save_session(thread_id, clean_query, full_answer, req.userId,
+                              tools=",".join(sorted(tools_used)))
             except Exception:
                 pass
 
-            # ── 首次对话生成标题 ──────────────────
+            # ── 异步存储语义长期记忆 ────────────────
+            if full_answer.strip():
+                try:
+                    import asyncio as _asyncio
+                    _asyncio.create_task(
+                        semantic_memory.add("default", clean_query, full_answer)
+                    )
+                except Exception:
+                    pass
+
+            # ── 在线评估记录 ───────────────────────
+            try:
+                total_time = int((__import__("time").monotonic() - start_time) * 1000)
+                online_eval.record(EvalRecord(
+                    session_id=thread_id,
+                    query_length=len(clean_query),
+                    answer_length=len(full_answer),
+                    tool_count=len(tools_used),
+                    completed=True,
+                    total_response_ms=total_time,
+                ))
+            except Exception:
+                pass
+
+            # ── 首次对话生成标题 ────────────────────
             if not req.get_conversation_id() and full_answer.strip():
                 try:
                     title = await _generate_title(clean_query, full_answer)
@@ -149,6 +233,19 @@ async def agent_chat(req: ChatRequest, request: Request):
 
         except Exception as e:
             logger.error(f"Agent 异常: {e}", exc_info=True)
+            # 失败也记录评估
+            try:
+                total_time = int((__import__("time").monotonic() - start_time) * 1000)
+                online_eval.record(EvalRecord(
+                    session_id=thread_id,
+                    query_length=len(clean_query),
+                    answer_length=len(full_answer),
+                    tool_count=len(tools_used),
+                    completed=False,
+                    total_response_ms=total_time,
+                ))
+            except Exception:
+                pass
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
             yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
             yield make_sse("[DONE]")
@@ -219,7 +316,7 @@ async def shell_confirm(req: ShellConfirmRequest):
 @router.post("/task/status")
 async def task_status(req: TaskQueryRequest):
 
-    result = task_executor.get_status(req.taskId)
+    result = await task_executor.get_status(req.taskId)
     if not result:
         return error(404, "任务不存在")
     return ok(result)
@@ -230,7 +327,7 @@ async def task_stream(req: TaskQueryRequest):
 
 
 
-    snapshot = task_executor.get_status(req.taskId)
+    snapshot = await task_executor.get_status(req.taskId)
     if not snapshot:
         async def _err():
             yield make_sse(json.dumps({"type": "error", "content": "任务不存在"}, ensure_ascii=False))
@@ -244,8 +341,20 @@ async def task_stream(req: TaskQueryRequest):
             yield make_sse(json.dumps({"type": "error", "content": snapshot.get("error", "执行失败")}, ensure_ascii=False))
         elif status == TaskStatus.CANCELLED.value:
             yield make_sse(json.dumps({"type": "error", "content": "任务已取消"}, ensure_ascii=False))
-        elif status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value):
-            yield make_sse(json.dumps({"type": "task_status", "taskId": req.taskId, "status": status}, ensure_ascii=False))
+        elif status in (
+            TaskStatus.CREATED.value,
+            TaskStatus.PENDING.value,
+            TaskStatus.RUNNING.value,
+            TaskStatus.EXECUTING.value,
+            TaskStatus.WAITING_HUMAN.value,
+        ):
+            yield make_sse(json.dumps({
+                "type": "task_status",
+                "taskId": req.taskId,
+                "status": status,
+                "approvalId": snapshot.get("approvalId", ""),
+                "interruptInfo": snapshot.get("interruptInfo"),
+            }, ensure_ascii=False))
         yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
         yield make_sse("[DONE]")
 
@@ -255,15 +364,26 @@ async def task_stream(req: TaskQueryRequest):
 @router.post("/task/cancel")
 async def task_cancel(req: TaskQueryRequest):
 
-    if task_executor.cancel(req.taskId):
+    if await task_executor.cancel(req.taskId):
         return ok(None, message="已发送取消信号")
     return error(404, "任务不存在")
+
+
+@router.post("/task/resume")
+async def task_resume(req: TaskResumeRequest):
+    """恢复挂起的后台任务（HITL 审批完成后调用）。"""
+    ok_resumed = await task_executor.resume(
+        req.taskId, {"action": req.action, "comment": req.comment}
+    )
+    if not ok_resumed:
+        return error(404, "任务不存在或非挂起状态")
+    return ok(None, message=f"任务已恢复（{req.action}）")
 
 
 @router.post("/task/list")
 async def task_list():
 
-    return ok(task_executor.list_tasks())
+    return ok(await task_executor.list_tasks())
 
 
 @router.post("/admin/gateway")
@@ -309,13 +429,14 @@ async def submit_feedback(req: FeedbackRequest):
 # 会话保存 / 标题生成
 # ═══════════════════════════════════════════
 
-def _save_session(session_id: str, question: str, answer: str, user_id: str = ""):
+def _save_session(session_id: str, question: str, answer: str, user_id: str = "",
+                  tools: str = ""):
     """写 agentx_session 表。"""
 
 
     store.save_message(
         session_id=session_id, question=question, answer=answer,
-        user_id=user_id or "", agent_type="triage",
+        user_id=user_id or "", agent_type="triage", tools=tools,
     )
 
 

@@ -8,10 +8,7 @@ import asyncio
 import json
 import logging
 
-from app.agent.agent_factory import _build_subagents_from_specialists
-from app.common.streaming import make_event, make_sse
-from app.harness.subagent_discovery import discover_specialists
-from app.prompt.executor_prompt import build_executor_prompt
+from app.common.streaming import extract_text_content, make_event, make_sse
 
 logger = logging.getLogger("apis")
 
@@ -32,37 +29,44 @@ class ExecutorAgent:
         self.cancel_event = snapshot.cancel_event
 
     async def run(self):
-        from app.agent.agent_factory import create_executor_agent
-        from app.gateway.model_gateway import model_gateway as _gw
+        # 复用 lifespan 注入的单例 executor_agent（app.state.executor_agent），
+        # 该单例已绑定 checkpointer/store/interrupt_on/middleware，避免每次 new
+        # 导致后台任务丢失 HITL/历史/热加载联动。
+        from app.harness.task_executor import task_executor
 
         yield {"_task_status": "running"}
 
         try:
-            specialists = discover_specialists()
-            prompt = build_executor_prompt(specialists)
+            agent = task_executor.executor_agent
+            if agent is None:
+                raise RuntimeError("executor_agent 未初始化（lifespan 未注入 task_executor.executor_agent）")
 
             # 构建输入
             query = self.snapshot.query
             if self.plan_text:
                 query = f"执行计划：\n{self.plan_text[:1000]}\n\n原始任务：{query}"
 
-            subagents = _build_subagents_from_specialists()
-            agent = await create_executor_agent(
-                system_prompt=prompt,
-                gateway=_gw if _gw._active else None,
-                subagents=subagents,
-            )
-
             inputs = {"messages": [("user", query)]}
 
             full_text = ""
-            config = {"configurable": {"recursion_limit": 200}}
+            # 后台任务用独立 thread_id（=task_id），与 /chat 会话历史隔离；
+            # checkpointer 会为其维护独立历史，支持中断恢复
+            config = {
+                "recursion_limit": 200,
+                "configurable": {"thread_id": self.snapshot.task_id},
+            }
+            interrupts = ()
             async for chunk in agent.astream_events(inputs, version="v2", config=config):
                 if self.cancel_event.is_set():
                     yield make_sse(json.dumps({"type": "text", "content": "\n\n[任务已取消]"}, ensure_ascii=False))
                     return
 
                 kind = chunk["event"]
+
+                if kind == "on_chain_stream":
+                    stream_chunk = chunk.get("data", {}).get("chunk", {})
+                    if isinstance(stream_chunk, dict) and stream_chunk.get("__interrupt__"):
+                        interrupts = stream_chunk["__interrupt__"]
 
                 if kind == "on_tool_start":
                     yield make_event("tool_start", toolName=chunk.get("name", ""))
@@ -73,10 +77,30 @@ class ExecutorAgent:
                 elif kind == "on_chat_model_stream":
                     data = chunk.get("data", {})
                     chunk_obj = data.get("chunk", "")
-                    if hasattr(chunk_obj, "content") and chunk_obj.content:
-                        text = chunk_obj.content
+                    if hasattr(chunk_obj, "content"):
+                        text = extract_text_content(chunk_obj.content)
+                    else:
+                        text = ""
+                    if text:
                         full_text += text
                         yield make_event("text", content=text)
+
+            if not interrupts and hasattr(agent, "aget_state"):
+                state = await agent.aget_state(config)
+                interrupts = getattr(state, "interrupts", ())
+
+            if interrupts:
+                interrupt_info, approval_id = _serialize_interrupts(interrupts)
+                self.snapshot.result = full_text
+                self.snapshot.result_summary = full_text[:500]
+                self.snapshot.interrupt_info = interrupt_info
+                self.snapshot.approval_id = approval_id
+                yield {
+                    "_task_status": "waiting_human",
+                    "interrupt_info": interrupt_info,
+                    "approval_id": approval_id,
+                }
+                return
 
             self.snapshot.result = full_text
             yield {"_task_status": "completed"}
@@ -87,3 +111,30 @@ class ExecutorAgent:
             logger.error(f"[ExecutorAgent] 异常: {e}", exc_info=True)
             self.snapshot.error = str(e)
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
+
+
+def _serialize_interrupts(interrupts) -> tuple[dict, str]:
+    """Convert LangGraph Interrupt objects into a JSON-serializable task payload."""
+    serialized = []
+    approval_id = ""
+    primary_value = None
+
+    for item in interrupts:
+        value = getattr(item, "value", None)
+        interrupt_id = getattr(item, "id", "")
+        serialized.append({"id": interrupt_id, "value": value})
+        if primary_value is None:
+            primary_value = value
+
+        if isinstance(value, dict):
+            for request in value.get("action_requests", []):
+                if not isinstance(request, dict):
+                    continue
+                args = request.get("args", {})
+                if isinstance(args, dict) and args.get("approval_id"):
+                    approval_id = str(args["approval_id"])
+                    break
+
+    info = dict(primary_value) if isinstance(primary_value, dict) else {}
+    info["interrupts"] = serialized
+    return info, approval_id

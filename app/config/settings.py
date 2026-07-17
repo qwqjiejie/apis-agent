@@ -11,7 +11,7 @@ def _get_env_file() -> Path:
     env_file = os.getenv("APIS_ENV_FILE")
     if env_file:
         return Path(env_file)
-    return Path(__file__).resolve().parents[3] / ".env"
+    return Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):

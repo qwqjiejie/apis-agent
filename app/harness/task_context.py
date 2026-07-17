@@ -1,10 +1,10 @@
 """任务上下文模型 — TaskSnapshot, TaskStatus, JournalEntry, TaskStore。"""
 
 import asyncio
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any, Protocol
 
 
 class TaskStatus(str, Enum):
@@ -125,27 +125,136 @@ class JournalEntry:
         }
 
 
-class TaskStore:
-    """内存任务状态存储。生产环境可替换为 PG Store 实现。"""
+TASK_NAMESPACE = ("tasks",)
+TASK_SEARCH_LIMIT = 1000
+
+
+class TaskStore(Protocol):
+    """任务快照仓储协议。"""
+
+    async def save(self, snapshot: TaskSnapshot) -> None: ...
+
+    async def get(self, task_id: str) -> TaskSnapshot | None: ...
+
+    async def list_tasks(self) -> list[TaskSnapshot]: ...
+
+    async def list_by_status(self, status: TaskStatus) -> list[TaskSnapshot]: ...
+
+    async def list_by_session(self, session_id: str) -> list[TaskSnapshot]: ...
+
+    async def delete(self, task_id: str) -> None: ...
+
+
+class MemoryTaskStore:
+    """PG 不可用时使用的进程内降级仓储。"""
 
     def __init__(self):
         self._tasks: dict[str, TaskSnapshot] = {}
+        self._lock = asyncio.Lock()
 
-    def save(self, snapshot: TaskSnapshot):
+    async def save(self, snapshot: TaskSnapshot) -> None:
         snapshot.updated_at = datetime.now(timezone.utc).isoformat()
-        self._tasks[snapshot.task_id] = snapshot
+        async with self._lock:
+            self._tasks[snapshot.task_id] = TaskSnapshot.from_dict(snapshot.to_dict())
 
-    def get(self, task_id: str) -> TaskSnapshot | None:
-        return self._tasks.get(task_id)
+    async def get(self, task_id: str) -> TaskSnapshot | None:
+        async with self._lock:
+            snapshot = self._tasks.get(task_id)
+            return TaskSnapshot.from_dict(snapshot.to_dict()) if snapshot else None
 
-    def list_tasks(self) -> list[TaskSnapshot]:
-        return sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+    async def list_tasks(self) -> list[TaskSnapshot]:
+        async with self._lock:
+            snapshots = [TaskSnapshot.from_dict(t.to_dict()) for t in self._tasks.values()]
+        return sorted(snapshots, key=lambda t: t.created_at, reverse=True)
 
-    def delete(self, task_id: str):
-        self._tasks.pop(task_id, None)
+    async def delete(self, task_id: str) -> None:
+        async with self._lock:
+            self._tasks.pop(task_id, None)
 
-    def list_by_status(self, status: TaskStatus) -> list[TaskSnapshot]:
-        return [t for t in self._tasks.values() if t.status == status]
+    async def list_by_status(self, status: TaskStatus) -> list[TaskSnapshot]:
+        return [t for t in await self.list_tasks() if t.status == status]
+
+    async def list_by_session(self, session_id: str) -> list[TaskSnapshot]:
+        return [t for t in await self.list_tasks() if t.conversation_id == session_id]
 
 
-task_store = TaskStore()
+class PgTaskStore:
+    """基于 LangGraph AsyncPostgresStore 的持久化任务仓储。"""
+
+    def __init__(self, store: Any):
+        if store is None:
+            raise ValueError("AsyncPostgresStore 不能为空")
+        self._store = store
+
+    @staticmethod
+    def _value(snapshot: TaskSnapshot) -> dict[str, Any]:
+        data = snapshot.to_dict()
+        return {
+            "snapshot": data,
+            "status": data["status"],
+            "conversation_id": data["conversation_id"],
+            "created_at": data["created_at"],
+            "updated_at": data["updated_at"],
+        }
+
+    @staticmethod
+    def _snapshot(value: dict[str, Any] | None) -> TaskSnapshot | None:
+        if not value:
+            return None
+        data = value.get("snapshot")
+        if not isinstance(data, dict):
+            return None
+        return TaskSnapshot.from_dict(data)
+
+    async def save(self, snapshot: TaskSnapshot) -> None:
+        snapshot.updated_at = datetime.now(timezone.utc).isoformat()
+        await self._store.aput(
+            TASK_NAMESPACE,
+            snapshot.task_id,
+            self._value(snapshot),
+            index=False,
+        )
+
+    async def get(self, task_id: str) -> TaskSnapshot | None:
+        item = await self._store.aget(TASK_NAMESPACE, task_id)
+        return self._snapshot(item.value) if item else None
+
+    async def list_tasks(self) -> list[TaskSnapshot]:
+        items = await self._store.asearch(TASK_NAMESPACE, limit=TASK_SEARCH_LIMIT)
+        snapshots = [self._snapshot(item.value) for item in items]
+        return sorted(
+            [snapshot for snapshot in snapshots if snapshot is not None],
+            key=lambda task: task.created_at,
+            reverse=True,
+        )
+
+    async def list_by_status(self, status: TaskStatus) -> list[TaskSnapshot]:
+        items = await self._store.asearch(
+            TASK_NAMESPACE,
+            filter={"status": status.value},
+            limit=TASK_SEARCH_LIMIT,
+        )
+        return [
+            snapshot
+            for item in items
+            if (snapshot := self._snapshot(item.value)) is not None
+        ]
+
+    async def list_by_session(self, session_id: str) -> list[TaskSnapshot]:
+        items = await self._store.asearch(
+            TASK_NAMESPACE,
+            filter={"conversation_id": session_id},
+            limit=TASK_SEARCH_LIMIT,
+        )
+        snapshots = [self._snapshot(item.value) for item in items]
+        return sorted(
+            [snapshot for snapshot in snapshots if snapshot is not None],
+            key=lambda task: task.created_at,
+            reverse=True,
+        )
+
+    async def delete(self, task_id: str) -> None:
+        await self._store.adelete(TASK_NAMESPACE, task_id)
+
+
+task_store: TaskStore = MemoryTaskStore()

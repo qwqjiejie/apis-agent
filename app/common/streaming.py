@@ -53,3 +53,26 @@ def make_event(event_type: str, **kwargs) -> dict:
 
 def make_sse(text: str) -> dict:
     return {"event": "message", "data": text}
+
+
+def extract_text_content(content) -> str:
+    """Extract displayable text from LangChain string or content-block payloads."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, (list, tuple)):
+        return ""
+
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type", "")
+        if block_type not in ("", "text", "output_text"):
+            continue
+        text = block.get("text", block.get("content", ""))
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts)
