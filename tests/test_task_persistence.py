@@ -13,7 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.agent.executor_agent import ExecutorAgent
+from app.agent.executor_agent import ExecutorAgent, _build_resume_command
 from app.api.routes import agent as agent_routes
 from app.harness.event_bus import EventBus
 from app.harness.task_context import PgTaskStore, TaskSnapshot, TaskStatus
@@ -195,6 +195,110 @@ async def test_v3_langgraph_interrupt_is_persisted_as_waiting_human(monkeypatch)
     assert persisted.interrupt_info is not None
     assert persisted.interrupt_info["action_requests"][0]["name"] == "request_approval"
     assert persisted.interrupt_info["interrupts"][0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_v4_resume_endpoint_continues_same_checkpoint(monkeypatch):
+    class ApprovalState(TypedDict):
+        messages: list
+
+    resumed_values = []
+    release = asyncio.Event()
+
+    async def request_approval(state):
+        decision = interrupt({
+            "action_requests": [{
+                "name": "request_approval",
+                "args": {
+                    "approval_id": "approval_v4",
+                    "description": "批准发布报告",
+                },
+                "description": "批准发布报告",
+            }],
+            "review_configs": [{
+                "action_name": "request_approval",
+                "allowed_decisions": ["approve", "reject"],
+            }],
+        })
+        resumed_values.append(decision)
+        await release.wait()
+        return {"messages": state["messages"]}
+
+    builder = StateGraph(ApprovalState)
+    builder.add_node("request_approval", request_approval)
+    builder.add_edge(START, "request_approval")
+    builder.add_edge("request_approval", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+
+    repository = PgTaskStore(FakeLangGraphStore())
+    executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
+    executor.executor_agent = graph
+    monkeypatch.setattr(task_executor_module, "task_executor", executor)
+    monkeypatch.setattr(agent_routes, "task_executor", executor)
+
+    async def execute(snapshot):
+        wrapper = ExecutorAgent(snapshot)
+        async for event in wrapper.run():
+            yield event
+
+    task_id = await executor.submit("session_v4", "需要审批后继续的任务", execute)
+
+    for _ in range(100):
+        waiting = await executor.get_status(task_id)
+        if waiting and waiting["status"] == TaskStatus.WAITING_HUMAN.value:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("任务未进入 waiting_human")
+
+    response = await agent_routes.task_resume(
+        agent_routes.TaskResumeRequest(taskId=task_id, action="approved")
+    )
+    assert json.loads(response.body)["code"] == 200
+
+    executing = await executor.get_status(task_id)
+    assert executing is not None
+    assert executing["status"] == TaskStatus.EXECUTING.value
+    assert executing["approvalId"] == ""
+    assert executing["interruptInfo"] is None
+
+    for _ in range(100):
+        if resumed_values:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("checkpoint 未收到 resume 数据")
+
+    assert resumed_values == [{"decisions": [{"type": "approve"}]}]
+    release.set()
+
+    for _ in range(100):
+        completed = await executor.get_status(task_id)
+        if completed and completed["status"] == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("审批后任务未完成")
+
+    persisted = await repository.get(task_id)
+    assert persisted is not None
+    assert persisted.status == TaskStatus.COMPLETED
+    assert persisted.approval_id == ""
+    assert persisted.interrupt_info is None
+
+
+def test_v4_rejection_maps_to_deepagents_decision():
+    command = _build_resume_command({
+        "action": "rejected",
+        "comment": "审批材料不完整",
+    })
+
+    assert command.resume == {
+        "decisions": [{
+            "type": "reject",
+            "message": "审批材料不完整",
+        }],
+    }
 
 
 def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):

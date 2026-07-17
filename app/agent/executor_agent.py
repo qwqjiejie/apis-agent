@@ -8,6 +8,8 @@ import asyncio
 import json
 import logging
 
+from langgraph.types import Command
+
 from app.common.streaming import extract_text_content, make_event, make_sse
 
 logger = logging.getLogger("apis")
@@ -29,26 +31,30 @@ class ExecutorAgent:
         self.cancel_event = snapshot.cancel_event
 
     async def run(self):
-        # 复用 lifespan 注入的单例 executor_agent（app.state.executor_agent），
-        # 该单例已绑定 checkpointer/store/interrupt_on/middleware，避免每次 new
-        # 导致后台任务丢失 HITL/历史/热加载联动。
-        from app.harness.task_executor import task_executor
-
         yield {"_task_status": "running"}
+
+        query = self.snapshot.query
+        if self.plan_text:
+            query = f"执行计划：\n{self.plan_text[:1000]}\n\n原始任务：{query}"
+
+        async for event in self._stream({"messages": [("user", query)]}):
+            yield event
+
+    async def resume(self, resume_data: dict):
+        """使用 LangGraph Command 恢复同一 task_id 对应的 checkpoint。"""
+        command = _build_resume_command(resume_data)
+        async for event in self._stream(command):
+            yield event
+
+    async def _stream(self, inputs):
+        # 复用 lifespan 注入的单例，该图已绑定 checkpointer/store/HITL middleware。
+        from app.harness.task_executor import task_executor
 
         try:
             agent = task_executor.executor_agent
             if agent is None:
                 raise RuntimeError("executor_agent 未初始化（lifespan 未注入 task_executor.executor_agent）")
 
-            # 构建输入
-            query = self.snapshot.query
-            if self.plan_text:
-                query = f"执行计划：\n{self.plan_text[:1000]}\n\n原始任务：{query}"
-
-            inputs = {"messages": [("user", query)]}
-
-            full_text = ""
             # 后台任务用独立 thread_id（=task_id），与 /chat 会话历史隔离；
             # checkpointer 会为其维护独立历史，支持中断恢复
             config = {
@@ -82,7 +88,6 @@ class ExecutorAgent:
                     else:
                         text = ""
                     if text:
-                        full_text += text
                         yield make_event("text", content=text)
 
             if not interrupts and hasattr(agent, "aget_state"):
@@ -91,8 +96,6 @@ class ExecutorAgent:
 
             if interrupts:
                 interrupt_info, approval_id = _serialize_interrupts(interrupts)
-                self.snapshot.result = full_text
-                self.snapshot.result_summary = full_text[:500]
                 self.snapshot.interrupt_info = interrupt_info
                 self.snapshot.approval_id = approval_id
                 yield {
@@ -102,7 +105,6 @@ class ExecutorAgent:
                 }
                 return
 
-            self.snapshot.result = full_text
             yield {"_task_status": "completed"}
 
         except asyncio.CancelledError:
@@ -111,6 +113,22 @@ class ExecutorAgent:
             logger.error(f"[ExecutorAgent] 异常: {e}", exc_info=True)
             self.snapshot.error = str(e)
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
+            yield {"_task_status": "failed"}
+
+
+def _build_resume_command(resume_data: dict) -> Command:
+    action = resume_data.get("action", "approved")
+    comment = str(resume_data.get("comment", "") or "")
+    if action == "approved":
+        decision = {"type": "approve"}
+    elif action == "rejected":
+        decision = {
+            "type": "reject",
+            "message": comment or "用户拒绝了该审批请求",
+        }
+    else:
+        raise ValueError(f"不支持的审批动作: {action}")
+    return Command(resume={"decisions": [decision]})
 
 
 def _serialize_interrupts(interrupts) -> tuple[dict, str]:

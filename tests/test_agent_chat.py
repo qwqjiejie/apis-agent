@@ -1,9 +1,13 @@
 import json
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.api.routes import agent as agent_routes
 
@@ -32,6 +36,27 @@ class FakeStreamingAgent:
                 ),
             },
         }
+
+
+class RecordingChatModel(FakeListChatModel):
+    """记录每次模型调用真正收到的 LangGraph 消息。"""
+
+    received_messages: ClassVar[list[list[tuple[str, str]]]] = []
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        self.received_messages.append([
+            (message.type, str(message.content))
+            for message in messages
+        ])
+        yield from super()._stream(messages, stop, run_manager, **kwargs)
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        self.received_messages.append([
+            (message.type, str(message.content))
+            for message in messages
+        ])
+        async for chunk in super()._astream(messages, stop, run_manager, **kwargs):
+            yield chunk
 
 
 def _sse_data(response) -> list[str]:
@@ -86,3 +111,98 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
     assert "recursion_limit" not in fake_agent.config["configurable"]
     assert fake_agent.config["configurable"]["user_id"] == "anon_v1-test-user"
     assert len(saved_messages) == 1
+
+
+def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
+    RecordingChatModel.received_messages.clear()
+    model = RecordingChatModel(responses=[
+        "我会记住代号青竹",
+        "你上一轮告诉我的代号是青竹",
+    ])
+    graph = create_agent(
+        model=model,
+        tools=[],
+        checkpointer=InMemorySaver(),
+    )
+    saved_messages = []
+
+    test_app = FastAPI()
+    test_app.include_router(agent_routes.router, prefix="/api/v1")
+    test_app.state.agent = graph
+
+    monkeypatch.setattr(
+        agent_routes,
+        "_save_session",
+        lambda *args, **kwargs: saved_messages.append((args, kwargs)),
+    )
+    monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="代号测试"))
+    monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
+    monkeypatch.setattr(agent_routes.store, "get_session_owner", lambda session_id: "")
+    monkeypatch.setattr(agent_routes.store, "touch_last_active", lambda session_id: None)
+    monkeypatch.setattr(agent_routes.semantic_memory, "search", AsyncMock(return_value=[]))
+    monkeypatch.setattr(agent_routes.semantic_memory, "add", AsyncMock())
+    monkeypatch.setattr(agent_routes.task_executor, "list_tasks_by_session", AsyncMock(return_value=[]))
+    monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
+
+    headers = {"X-Anonymous-Id": "v5-test-user"}
+    with TestClient(test_app) as client:
+        first = client.post(
+            "/api/v1/agent/chat",
+            json={"message": "请记住我的代号是青竹"},
+            headers=headers,
+        )
+        conversation_id = first.headers["x-session-id"]
+
+        second = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "我上一轮说的代号是什么？",
+                "conversationId": conversation_id,
+            },
+            headers=headers,
+        )
+
+    first_text = "".join(
+        event.get("content", "")
+        for item in _sse_data(first)
+        if item != "[DONE]"
+        for event in [json.loads(item)]
+        if event["type"] == "text"
+    )
+    second_text = "".join(
+        event.get("content", "")
+        for item in _sse_data(second)
+        if item != "[DONE]"
+        for event in [json.loads(item)]
+        if event["type"] == "text"
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.headers["x-session-id"] == conversation_id
+    assert first_text == "我会记住代号青竹"
+    assert second_text == "你上一轮告诉我的代号是青竹"
+    assert RecordingChatModel.received_messages == [
+        [("human", "请记住我的代号是青竹")],
+        [
+            ("human", "请记住我的代号是青竹"),
+            ("ai", "我会记住代号青竹"),
+            ("human", "我上一轮说的代号是什么？"),
+        ],
+    ]
+    checkpoint = graph.get_state({
+        "configurable": {"thread_id": conversation_id},
+    })
+    assert [
+        (message.type, str(message.content))
+        for message in checkpoint.values["messages"]
+    ] == [
+        ("human", "请记住我的代号是青竹"),
+        ("ai", "我会记住代号青竹"),
+        ("human", "我上一轮说的代号是什么？"),
+        ("ai", "你上一轮告诉我的代号是青竹"),
+    ]
+    assert [call[0][0] for call in saved_messages] == [
+        conversation_id,
+        conversation_id,
+    ]

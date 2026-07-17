@@ -80,93 +80,13 @@ class TaskExecutor:
         await self._event_bus.publish("task.created", snapshot.to_dict())
 
         async def _run():
-            snapshot.status = TaskStatus.EXECUTING
-            await self._store.save(snapshot)
-            await self._event_bus.publish("task.executing", snapshot.to_dict())
-
             try:
-                parts: list[str] = []
-                async for event in execute_fn(snapshot):
-                    if snapshot.cancel_event.is_set():
-                        snapshot.status = TaskStatus.CANCELLED
-                        await self._store.save(snapshot)
-                        await self._event_bus.publish("task.cancelled", snapshot.to_dict())
-                        return
-
-                    if isinstance(event, dict):
-                        payload = self._event_payload(event)
-                        status_update = payload.get("_task_status")
-                        if status_update:
-                            if status_update == "waiting_human":
-                                snapshot.status = TaskStatus.WAITING_HUMAN
-                                snapshot.interrupt_info = (
-                                    payload.get("interrupt_info")
-                                    or snapshot.interrupt_info
-                                )
-                                snapshot.approval_id = (
-                                    payload.get("approval_id")
-                                    or snapshot.approval_id
-                                )
-                                await self._store.save(snapshot)
-                                await self._event_bus.publish("task.interrupted", snapshot.to_dict())
-                                self._unhandled_approval.pop(task_id, None)
-                                return  # 挂起，等待外部 resume
-                            else:
-                                try:
-                                    next_status = TaskStatus(status_update)
-                                    snapshot.status = (
-                                        TaskStatus.EXECUTING
-                                        if next_status == TaskStatus.RUNNING
-                                        else next_status
-                                    )
-                                except ValueError:
-                                    pass
-                                await self._store.save(snapshot)
-
-                        if payload.get("type") == "error":
-                            parts.append(f"[错误] {payload.get('content', '')}")
-                            self._check_approval_marker(task_id, payload.get("content", ""))
-                        elif payload.get("type") == "text":
-                            content = payload.get("content", "")
-                            parts.append(content)
-                            self._check_approval_marker(task_id, content)
-                        elif payload.get("type") == "thinking":
-                            parts.append(f"[思考] {payload.get('content', '')}")
-
-                snapshot.result = "\n".join(parts)
-                snapshot.result_summary = snapshot.result[:500]
-                if snapshot.status not in (
-                    TaskStatus.CANCELLED,
-                    TaskStatus.WAITING_HUMAN,
-                ):
-                    snapshot.status = TaskStatus.COMPLETED
-                snapshot.updated_at = datetime.now(timezone.utc).isoformat()
+                snapshot.status = TaskStatus.EXECUTING
                 await self._store.save(snapshot)
-
-                # 写入完成 Journal
-                await self._write_journal(task_id, "completed", f"任务完成: {snapshot.result_summary[:200]}")
-                await self._event_bus.publish("task.completed", snapshot.to_dict())
-                logger.info(f"[TaskExecutor] 任务完成: {task_id}")
-
-            except ApprovalNotHandledError as e:
-                await self._force_approval_interrupt(snapshot, e)
-            except asyncio.CancelledError:
-                snapshot.status = TaskStatus.CANCELLED
-                await self._store.save(snapshot)
-                await self._event_bus.publish("task.cancelled", snapshot.to_dict())
-            except Exception as e:
-                logger.error(f"[TaskExecutor] 任务 {task_id} 异常: {e}", exc_info=True)
-                snapshot.status = TaskStatus.FAILED
-                snapshot.error = str(e)
-                snapshot.error_message = str(e)
-                snapshot.updated_at = datetime.now(timezone.utc).isoformat()
-                await self._store.save(snapshot)
-                await self._event_bus.publish("task.failed", snapshot.to_dict())
+                await self._event_bus.publish("task.executing", snapshot.to_dict())
+                await self._drive(snapshot, lambda: execute_fn(snapshot))
             finally:
-                self._running.pop(task_id, None)
-                self._live_snapshots.pop(task_id, None)
-                self._msg_counts.pop(task_id, None)
-                self._unhandled_approval.pop(task_id, None)
+                self._forget_runtime(task_id)
 
         task = asyncio.create_task(_run())
         self._running[task_id] = task
@@ -177,28 +97,143 @@ class TaskExecutor:
 
     async def resume(self, task_id: str, resume_data: dict) -> bool:
         """恢复挂起的任务（HITL 审批完成）。"""
+        action = resume_data.get("action", "approved")
+        if action not in {"approved", "rejected"}:
+            raise ValueError(f"不支持的审批动作: {action}")
+
         snapshot = await self._store.get(task_id)
         if not snapshot or snapshot.status != TaskStatus.WAITING_HUMAN:
             return False
 
-        action = resume_data.get("action", "approved")
         logger.info(f"[TaskExecutor] 恢复任务: {task_id}, action={action}")
+        snapshot.status = TaskStatus.EXECUTING
+        snapshot.interrupt_info = None
+        snapshot.approval_id = ""
+        snapshot.recovery_hint = ""
+        snapshot.error = ""
+        snapshot.error_message = ""
+        await self._store.save(snapshot)
+        await self._event_bus.publish("task.resumed", snapshot.to_dict())
 
-        # 重建执行协程
         async def _resume():
-            snapshot.status = TaskStatus.EXECUTING
-            await self._store.save(snapshot)
-            await self._event_bus.publish("task.resumed", snapshot.to_dict())
-            # 审批结果注入到结果中
-            snapshot.result = (snapshot.result or "") + f"\n[审批结果: {action}]"
-            await self._store.save(snapshot)
-            await self._event_bus.publish("task.completed", snapshot.to_dict())
+            from app.agent.executor_agent import ExecutorAgent
+
+            try:
+                wrapper = ExecutorAgent(snapshot)
+                await self._drive(snapshot, lambda: wrapper.resume(resume_data))
+            finally:
+                self._forget_runtime(task_id)
 
         task = asyncio.create_task(_resume())
         self._running[task_id] = task
+        self._live_snapshots[task_id] = snapshot
         snapshot._task_ref = task
         self._unhandled_approval.pop(task_id, None)
         return True
+
+    async def _drive(self, snapshot: TaskSnapshot, stream_factory) -> None:
+        """消费首次执行或 checkpoint 续跑事件，并统一持久化生命周期。"""
+        task_id = snapshot.task_id
+        parts = [snapshot.result] if snapshot.result else []
+
+        try:
+            async for event in stream_factory():
+                if snapshot.cancel_event.is_set():
+                    snapshot.status = TaskStatus.CANCELLED
+                    await self._persist_terminal(snapshot)
+                    return
+
+                if not isinstance(event, dict):
+                    continue
+
+                payload = self._event_payload(event)
+                status_update = payload.get("_task_status")
+                if status_update == TaskStatus.WAITING_HUMAN.value:
+                    snapshot.status = TaskStatus.WAITING_HUMAN
+                    snapshot.interrupt_info = (
+                        payload.get("interrupt_info") or snapshot.interrupt_info
+                    )
+                    snapshot.approval_id = (
+                        payload.get("approval_id") or snapshot.approval_id
+                    )
+                    self._update_result(snapshot, parts)
+                    await self._store.save(snapshot)
+                    await self._event_bus.publish("task.interrupted", snapshot.to_dict())
+                    self._unhandled_approval.pop(task_id, None)
+                    return
+
+                if status_update:
+                    try:
+                        next_status = TaskStatus(status_update)
+                        snapshot.status = (
+                            TaskStatus.EXECUTING
+                            if next_status == TaskStatus.RUNNING
+                            else next_status
+                        )
+                    except ValueError:
+                        logger.warning(
+                            "[TaskExecutor] 忽略未知任务状态: %s (%s)",
+                            status_update,
+                            task_id,
+                        )
+
+                event_type = payload.get("type")
+                content = str(payload.get("content", "") or "")
+                if event_type == "error":
+                    parts.append(f"\n[错误] {content}")
+                    snapshot.error = content
+                    snapshot.error_message = content
+                    self._check_approval_marker(task_id, content)
+                elif event_type == "text":
+                    parts.append(content)
+                    self._check_approval_marker(task_id, content)
+                elif event_type == "thinking":
+                    parts.append(f"\n[思考] {content}")
+
+            self._update_result(snapshot, parts)
+            if not snapshot.is_terminal:
+                snapshot.status = TaskStatus.COMPLETED
+            await self._persist_terminal(snapshot)
+
+        except ApprovalNotHandledError as error:
+            self._update_result(snapshot, parts)
+            await self._force_approval_interrupt(snapshot, error)
+        except asyncio.CancelledError:
+            snapshot.status = TaskStatus.CANCELLED
+            self._update_result(snapshot, parts)
+            await self._persist_terminal(snapshot)
+        except Exception as error:
+            logger.error(f"[TaskExecutor] 任务 {task_id} 异常: {error}", exc_info=True)
+            snapshot.status = TaskStatus.FAILED
+            snapshot.error = str(error)
+            snapshot.error_message = str(error)
+            self._update_result(snapshot, parts)
+            await self._persist_terminal(snapshot)
+
+    async def _persist_terminal(self, snapshot: TaskSnapshot) -> None:
+        snapshot.updated_at = datetime.now(timezone.utc).isoformat()
+        await self._store.save(snapshot)
+
+        event_name = f"task.{snapshot.status.value}"
+        if snapshot.status == TaskStatus.COMPLETED:
+            await self._write_journal(
+                snapshot.task_id,
+                "completed",
+                f"任务完成: {snapshot.result_summary[:200]}",
+            )
+            logger.info(f"[TaskExecutor] 任务完成: {snapshot.task_id}")
+        await self._event_bus.publish(event_name, snapshot.to_dict())
+
+    @staticmethod
+    def _update_result(snapshot: TaskSnapshot, parts: list[str]) -> None:
+        snapshot.result = "".join(parts)
+        snapshot.result_summary = snapshot.result[:500]
+
+    def _forget_runtime(self, task_id: str) -> None:
+        self._running.pop(task_id, None)
+        self._live_snapshots.pop(task_id, None)
+        self._msg_counts.pop(task_id, None)
+        self._unhandled_approval.pop(task_id, None)
 
     async def cancel(self, task_id: str) -> bool:
         snapshot = await self._store.get(task_id)

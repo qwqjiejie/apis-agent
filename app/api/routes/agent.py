@@ -2,6 +2,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
@@ -60,7 +61,10 @@ class TaskQueryRequest(BaseModel):
 
 class TaskResumeRequest(BaseModel):
     taskId: str = Field(..., min_length=1)
-    action: str = Field(default="approved", description="approved=通过 rejected=拒绝")
+    action: Literal["approved", "rejected"] = Field(
+        default="approved",
+        description="approved=通过 rejected=拒绝",
+    )
     comment: str = Field(default="", max_length=500)
 
 
