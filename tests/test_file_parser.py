@@ -1,4 +1,4 @@
-from src.apis_agent.utils.file_parser import get_file_type, is_supported, validate_mime_type
+from app.utils.file_parser import get_file_type, is_supported, validate_mime_type
 
 
 class TestGetFileType:

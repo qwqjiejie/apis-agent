@@ -1,4 +1,4 @@
-from src.apis_agent.context.token_counter import count_tokens, estimate_messages_tokens
+from app.context.token_counter import count_tokens, estimate_messages_tokens
 
 
 class TestCountTokens:

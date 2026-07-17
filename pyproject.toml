@@ -33,6 +33,10 @@ dependencies = [
     "watchfiles>=1.0.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app", "app.*"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

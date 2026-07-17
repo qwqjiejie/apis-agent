@@ -1,4 +1,4 @@
-from src.apis_agent.utils.text_splitter import split_text
+from app.utils.text_splitter import split_text
 
 
 class TestSplitText:

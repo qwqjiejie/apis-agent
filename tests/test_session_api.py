@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-from src.apis_agent.api.main import app
-from src.apis_agent.service.session_service import store
+from app.api.main import app
+from app.service.session_service import store
 
 client = TestClient(app)
 
