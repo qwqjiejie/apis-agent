@@ -11,6 +11,9 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.api.routes import agent as agent_routes
 from app.auth import generate_token
+from app.bootstrap.container import ApplicationContainer
+from app.gateway.model_gateway import ModelGateway
+from app.harness.task_context import task_context_manager
 
 
 class FakeStreamingAgent:
@@ -68,6 +71,26 @@ def _sse_data(response) -> list[str]:
     ]
 
 
+def _attach_runtime(test_app: FastAPI, agent):
+    memory = SimpleNamespace(
+        search=AsyncMock(return_value=[]),
+        add=AsyncMock(),
+        build_context_injection=lambda _memories: "",
+    )
+    executor = SimpleNamespace(
+        list_tasks_by_session=AsyncMock(return_value=[]),
+    )
+    runtime = ApplicationContainer(
+        model_gateway=ModelGateway(),
+        agent=agent,
+        semantic_memory=memory,
+        task_executor=executor,
+        context_manager=task_context_manager,
+    )
+    test_app.state.container = runtime
+    return runtime
+
+
 def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
     fake_agent = FakeStreamingAgent()
     saved_messages = []
@@ -75,7 +98,7 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
     test_app = FastAPI()
     test_app.include_router(agent_routes.router, prefix="/api/v1")
     test_app.include_router(agent_routes.chat_router, prefix="/api/v1")
-    test_app.state.agent = fake_agent
+    _attach_runtime(test_app, fake_agent)
 
     monkeypatch.setattr(
         agent_routes,
@@ -84,8 +107,6 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
     )
     monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="天气"))
     monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
-    monkeypatch.setattr(agent_routes.semantic_memory, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(agent_routes.semantic_memory, "add", AsyncMock())
     monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
 
     with TestClient(test_app) as client:
@@ -131,7 +152,7 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
 
     test_app = FastAPI()
     test_app.include_router(agent_routes.router, prefix="/api/v1")
-    test_app.state.agent = graph
+    _attach_runtime(test_app, graph)
 
     monkeypatch.setattr(
         agent_routes,
@@ -146,9 +167,6 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
         lambda session_id: "anon_v5-test-user",
     )
     monkeypatch.setattr(agent_routes.store, "touch_last_active", lambda session_id: None)
-    monkeypatch.setattr(agent_routes.semantic_memory, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(agent_routes.semantic_memory, "add", AsyncMock())
-    monkeypatch.setattr(agent_routes.task_executor, "list_tasks_by_session", AsyncMock(return_value=[]))
     monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
 
     headers = {"X-Anonymous-Id": "v5-test-user"}
@@ -219,7 +237,7 @@ def test_v7_user_cannot_access_another_users_conversation(monkeypatch):
     fake_agent = FakeStreamingAgent()
     test_app = FastAPI()
     test_app.include_router(agent_routes.chat_router, prefix="/api/v1")
-    test_app.state.agent = fake_agent
+    _attach_runtime(test_app, fake_agent)
 
     monkeypatch.setattr(
         agent_routes.store,

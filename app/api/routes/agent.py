@@ -16,12 +16,9 @@ from app.common.logger import logger
 from app.common.response import error, ok
 from app.common.streaming import extract_text_content, make_event, make_sse
 from app.config.settings import get_settings
-from app.gateway.model_gateway import model_gateway
 from app.gateway.status_events import drain_gateway_status, gateway_status_queue
-from app.harness.task_context import ChatContext, TaskStatus, task_context_manager
-from app.harness.task_executor import task_executor
+from app.harness.task_context import ChatContext, TaskStatus
 from app.prompt.triage_prompt import parse_capability_prefix
-from app.memory.semantic_memory import semantic_memory
 from app.evaluation.online_eval import EvalRecord, online_eval
 from app.auth import get_current_user_id
 from app.service.session_service import store
@@ -100,7 +97,11 @@ async def agent_chat(req: ChatRequest, request: Request):
 
     # ── 认证 + session 归属校验 ────────────────────
     user_id = get_current_user_id(request)
-    agent = request.app.state.agent
+    runtime = request.app.state.container
+    agent = runtime.agent
+    semantic_memory = runtime.semantic_memory
+    task_executor = runtime.task_executor
+    task_context_manager = runtime.context_manager
     thread_id = conversation_id or str(uuid.uuid4())
 
     if conversation_id:
@@ -342,8 +343,7 @@ async def shell_confirm(req: ShellConfirmRequest, request: Request):
 
 @router.post("/task/status")
 async def task_status(req: TaskQueryRequest, request: Request):
-
-    result = await task_executor.get_status(
+    result = await request.app.state.container.task_executor.get_status(
         req.taskId,
         user_id=get_current_user_id(request),
     )
@@ -354,10 +354,7 @@ async def task_status(req: TaskQueryRequest, request: Request):
 
 @router.post("/task/stream")
 async def task_stream(req: TaskQueryRequest, request: Request):
-
-
-
-    snapshot = await task_executor.get_status(
+    snapshot = await request.app.state.container.task_executor.get_status(
         req.taskId,
         user_id=get_current_user_id(request),
     )
@@ -396,8 +393,7 @@ async def task_stream(req: TaskQueryRequest, request: Request):
 
 @router.post("/task/cancel")
 async def task_cancel(req: TaskQueryRequest, request: Request):
-
-    if await task_executor.cancel(
+    if await request.app.state.container.task_executor.cancel(
         req.taskId,
         user_id=get_current_user_id(request),
     ):
@@ -408,7 +404,7 @@ async def task_cancel(req: TaskQueryRequest, request: Request):
 @router.post("/task/resume")
 async def task_resume(req: TaskResumeRequest, request: Request):
     """恢复挂起的后台任务（HITL 审批完成后调用）。"""
-    ok_resumed = await task_executor.resume(
+    ok_resumed = await request.app.state.container.task_executor.resume(
         req.taskId,
         {"action": req.action, "comment": req.comment},
         user_id=get_current_user_id(request),
@@ -420,21 +416,22 @@ async def task_resume(req: TaskResumeRequest, request: Request):
 
 @router.post("/task/list")
 async def task_list(request: Request):
-
-    return ok(await task_executor.list_tasks(user_id=get_current_user_id(request)))
+    return ok(await request.app.state.container.task_executor.list_tasks(
+        user_id=get_current_user_id(request),
+    ))
 
 
 @router.post("/admin/gateway")
-async def gateway_status():
-
-    return ok(model_gateway.get_all_status())
+async def gateway_status(request: Request):
+    gateway = request.app.state.container.model_gateway
+    return ok(gateway.get_all_status())
 
 
 @router.post("/admin/gateway/switch")
-async def gateway_switch(req: GatewaySwitchRequest):
-
+async def gateway_switch(req: GatewaySwitchRequest, request: Request):
+    gateway = request.app.state.container.model_gateway
     try:
-        await model_gateway.set_active(req.modelName)
+        await gateway.set_active(req.modelName)
         return ok(None, message=f"已切换到 {req.modelName}")
     except ValueError as e:
         return error(400, str(e))

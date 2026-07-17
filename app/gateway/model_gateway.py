@@ -10,9 +10,10 @@ logger = logging.getLogger("apis")
 
 
 class ModelGateway:
-    """模型智能网关单例。
+    """模型智能网关。
 
     职责：注册表管理、健康跟踪、熔断路由、热切换、后台探活。
+    实例由应用运行时容器持有，不在模块导入时创建。
     """
 
     def __init__(self):
@@ -177,6 +178,3 @@ class ModelGateway:
             except asyncio.CancelledError:
                 pass
             self._probe_task = None
-
-
-model_gateway = ModelGateway()

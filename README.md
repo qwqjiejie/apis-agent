@@ -7,6 +7,9 @@ Executor 驱动长周期后台任务，Specialist 通过声明式 `AGENT.md` 提
 当前仓库同时包含后端 API、轻量前端、任务可靠性组件、文档 RAG、Skills 管理和
 在线/离线评估工具，是一个单体部署、模块化组织的 Python 应用。
 
+当前架构差距、目标目录、实施阶段和验收标准见
+[架构优化实施计划](docs/architecture-optimization-plan.md)。优化采用模块化单体和渐进迁移策略。
+
 ## 核心能力
 
 - **三层 Agent 协作**：Triage DeepAgent -> Executor DeepAgent -> Specialist SubAgent
@@ -62,7 +65,10 @@ Client / Static Web
 FastAPI: CORS -> RateLimit -> Trace/Logging -> Routes
         |
         v
-Triage DeepAgent (app.state.agent)
+ApplicationContainer (唯一运行时依赖入口)
+        |
+        v
+Triage DeepAgent (container.agent)
         |
         +-- 直接回答 / 调用工具
         |
@@ -74,7 +80,7 @@ Triage DeepAgent (app.state.agent)
               TaskExecutor
                     |
                     v
-         Executor DeepAgent (app.state.executor_agent)
+         Executor DeepAgent (container.executor_agent)
                     |
                     +-- Specialist SubAgent
                     +-- request_approval -> HITL interrupt/resume
@@ -88,7 +94,7 @@ Triage DeepAgent (app.state.agent)
 
 | 层级 | 目录 | 职责 |
 |---|---|---|
-| 启动与传输 | `app/main.py`、`app/api` | 基础设施预检、FastAPI lifespan、中间件、路由和 SSE |
+| 启动与传输 | `app/main.py`、`app/bootstrap`、`app/api` | 基础设施预检、运行时依赖装配、FastAPI lifespan、中间件、路由和 SSE |
 | Agent 编排 | `app/agent`、`app/subagents`、`app/prompt` | Agent 构建、Executor 包装、领域代理和系统提示词 |
 | 可靠性 Harness | `app/harness` | 任务生命周期、快照、Journal、HITL、事件总线、DLQ 和热加载 |
 | 模型网关 | `app/gateway` | 模型注册、健康状态、熔断、动态路由和状态事件 |

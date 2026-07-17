@@ -15,8 +15,15 @@ from langgraph.types import interrupt
 
 from app.agent.executor_agent import ExecutorAgent, _build_resume_command
 from app.api.routes import agent as agent_routes
+from app.bootstrap.container import ApplicationContainer
+from app.gateway.model_gateway import ModelGateway
 from app.harness.event_bus import EventBus
-from app.harness.task_context import PgTaskStore, TaskSnapshot, TaskStatus
+from app.harness.task_context import (
+    PgTaskStore,
+    TaskSnapshot,
+    TaskStatus,
+    task_context_manager,
+)
 from app.harness import task_executor as task_executor_module
 from app.harness.task_executor import TaskExecutor
 from app.tool.task_tools import create_background_task
@@ -75,6 +82,21 @@ class BackgroundTaskTriageAgent:
                 "chunk": SimpleNamespace(content=result, additional_kwargs={}),
             },
         }
+
+
+def _attach_runtime(test_app: FastAPI, executor: TaskExecutor, agent=None):
+    memory = SimpleNamespace(
+        search=AsyncMock(return_value=[]),
+        add=AsyncMock(),
+        build_context_injection=lambda _memories: "",
+    )
+    test_app.state.container = ApplicationContainer(
+        model_gateway=ModelGateway(),
+        agent=agent,
+        task_executor=executor,
+        context_manager=task_context_manager,
+        semantic_memory=memory,
+    )
 
 
 @pytest.mark.asyncio
@@ -237,7 +259,9 @@ async def test_v4_resume_endpoint_continues_same_checkpoint(monkeypatch):
     executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
     executor.executor_agent = graph
     monkeypatch.setattr(task_executor_module, "task_executor", executor)
-    monkeypatch.setattr(agent_routes, "task_executor", executor)
+
+    test_app = FastAPI()
+    _attach_runtime(test_app, executor)
 
     async def execute(snapshot):
         wrapper = ExecutorAgent(snapshot)
@@ -264,6 +288,7 @@ async def test_v4_resume_endpoint_continues_same_checkpoint(monkeypatch):
         Request({
             "type": "http",
             "headers": [(b"x-anonymous-id", b"v4-test-user")],
+            "app": test_app,
         }),
     )
     assert json.loads(response.body)["code"] == 200
@@ -410,17 +435,14 @@ def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
     executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
     executor.executor_agent = BlockingExecutorGraph()
     monkeypatch.setattr(task_executor_module, "task_executor", executor)
-    monkeypatch.setattr(agent_routes, "task_executor", executor)
 
     test_app = FastAPI()
     test_app.include_router(agent_routes.router, prefix="/api/v1")
-    test_app.state.agent = BackgroundTaskTriageAgent()
+    _attach_runtime(test_app, executor, BackgroundTaskTriageAgent())
 
     monkeypatch.setattr(agent_routes, "_save_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="研究报告"))
     monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
-    monkeypatch.setattr(agent_routes.semantic_memory, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(agent_routes.semantic_memory, "add", AsyncMock())
     monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
 
     with TestClient(test_app) as client:

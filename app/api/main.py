@@ -16,6 +16,11 @@ from app.api.routes.session import router as session_router
 from app.api.routes.file import router as file_router
 from app.api.routes.skill_routes import router as skill_router
 from app.api.routes.auth_routes import router as auth_router
+from app.bootstrap.container import (
+    ApplicationContainer,
+    clear_application_container,
+    set_application_container,
+)
 from app.common.exceptions import ApisAgentError, InfrastructureError, ValidationError
 from app.common.logger import logger
 from app.common.trace_context import generate_trace_id, set_trace_context
@@ -38,36 +43,41 @@ async def _rebuild_agents(app: FastAPI):
 async def _do_rebuild(app: FastAPI):
     from app.agent.agent_factory import (
         create_triage_agent, create_executor_agent,
-        _build_subagents_from_specialists, _build_external_tools,
+        _build_subagents_from_specialists,
     )
     from app.prompt.triage_prompt import build_triage_prompt
     from app.prompt.executor_prompt import build_executor_prompt
-    from app.tool import TOOL_REGISTRY
+
+    container: ApplicationContainer = app.state.container
 
     subagents = _build_subagents_from_specialists()
     triage_prompt = build_triage_prompt()
     executor_prompt = build_executor_prompt()
 
-    executor_tools = [TOOL_REGISTRY[n] for n in ("request_approval", "read_task_journal") if n in TOOL_REGISTRY]
-    gateway = getattr(app.state, "model_gateway", None)
-
     new_triage = await create_triage_agent(
-        system_prompt=triage_prompt, gateway=gateway, subagents=subagents,
-        checkpointer=getattr(app.state, "checkpointer", None),
-        store=getattr(app.state, "store", None),
+        system_prompt=triage_prompt,
+        gateway=container.model_gateway,
+        subagents=subagents,
+        checkpointer=container.checkpointer,
+        store=container.store,
     )
     new_executor = await create_executor_agent(
-        system_prompt=executor_prompt, gateway=gateway, subagents=subagents,
-        checkpointer=getattr(app.state, "checkpointer", None),
-        store=getattr(app.state, "store", None),
+        system_prompt=executor_prompt,
+        gateway=container.model_gateway,
+        subagents=subagents,
+        checkpointer=container.checkpointer,
+        store=container.store,
         interrupt_on={"request_approval": True},
     )
 
+    container.agent = new_triage
+    container.executor_agent = new_executor
+    container.specialist_subagents = subagents
     app.state.agent = new_triage
     app.state.executor_agent = new_executor
     app.state.specialist_subagents = subagents
-    if hasattr(app.state, "task_executor"):
-        app.state.task_executor.executor_agent = new_executor
+    if container.task_executor is not None:
+        container.task_executor.executor_agent = new_executor
     _last_rebuild_time = time.monotonic()
     logger.info("[HotReload] Agent 重建完成 (subagents=%d)", len(subagents))
 
@@ -81,6 +91,9 @@ async def lifespan(app: FastAPI):
     from app.common.llm import _create_raw_llm
 
     gateway = ModelGateway()
+    container = ApplicationContainer(model_gateway=gateway)
+    set_application_container(container)
+    app.state.container = container
     llm = _create_raw_llm()
     await gateway.register(s.llm_model, llm, is_primary=True)
     if s.fallback_model:
@@ -89,6 +102,7 @@ async def lifespan(app: FastAPI):
         await gateway.register(s.fallback_model, fl, is_primary=False)
         gateway.set_fallback([s.fallback_model])
     await gateway.start_probe(s.gateway_health_probe_interval_sec)
+    # 兼容旧调用方；运行时对象的权威来源是 app.state.container。
     app.state.model_gateway = gateway
 
     # ── 2. PG Store (checkpointer + store) ─────────
@@ -98,6 +112,8 @@ async def lifespan(app: FastAPI):
     if await pg_store_manager.initialize():
         app.state.checkpointer = pg_store_manager.checkpointer
         app.state.store = pg_store_manager.store
+    container.checkpointer = app.state.checkpointer
+    container.store = app.state.store
 
     # ── 4. MinIO ────────────────────────────────────
     app.state.minio_client = None
@@ -113,33 +129,34 @@ async def lifespan(app: FastAPI):
             logger.info(f"[main] MinIO 已连接: {s.minio_host}")
         except Exception as e:
             logger.warning(f"[main] MinIO 不可用: {e}")
+    container.minio_client = app.state.minio_client
 
     # ── 3. SubAgent 发现 ────────────────────────────
     from app.agent.agent_factory import _build_subagents_from_specialists
     subagents = _build_subagents_from_specialists()
+    container.specialist_subagents = subagents
     app.state.specialist_subagents = subagents
 
     # ── 4. 创建 Triage DeepAgent ────────────────────
     from app.agent.agent_factory import create_triage_agent, create_executor_agent
     from app.prompt.triage_prompt import build_triage_prompt
     from app.prompt.executor_prompt import build_executor_prompt
-    from app.tool import TOOL_REGISTRY
-
-    app.state.agent = await create_triage_agent(
+    container.agent = await create_triage_agent(
         system_prompt=build_triage_prompt(), gateway=gateway, subagents=subagents,
-        checkpointer=getattr(app.state, "checkpointer", None),
-        store=getattr(app.state, "store", None),
+        checkpointer=container.checkpointer,
+        store=container.store,
     )
+    app.state.agent = container.agent
     logger.info(f"[main] Triage DeepAgent 创建完成 (subagents=%d)", len(subagents))
 
     # ── 5. 创建 Executor DeepAgent ──────────────────
-    executor_tools = [TOOL_REGISTRY[n] for n in ("request_approval", "read_task_journal") if n in TOOL_REGISTRY]
-    app.state.executor_agent = await create_executor_agent(
+    container.executor_agent = await create_executor_agent(
         system_prompt=build_executor_prompt(), gateway=gateway, subagents=subagents,
-        checkpointer=getattr(app.state, "checkpointer", None),
-        store=getattr(app.state, "store", None),
+        checkpointer=container.checkpointer,
+        store=container.store,
         interrupt_on={"request_approval": True},
     )
+    app.state.executor_agent = container.executor_agent
     logger.info("[main] Executor DeepAgent 创建完成")
 
     # ── 6. TaskExecutor（注入 executor_agent）────────
@@ -150,22 +167,25 @@ async def lifespan(app: FastAPI):
         TaskSnapshot,
         task_context_manager,
     )
-    if getattr(app.state, "store", None) is not None:
-        task_repository = PgTaskStore(app.state.store)
+    if container.store is not None:
+        task_repository = PgTaskStore(container.store)
         logger.info("[main] TaskExecutor 使用 PostgreSQL 持久化仓储")
     else:
         task_repository = MemoryTaskStore()
         logger.warning("[main] PG Store 不可用，TaskExecutor 降级为内存仓储")
     task_executor.configure(
         store=task_repository,
-        executor_agent=app.state.executor_agent,
+        executor_agent=container.executor_agent,
     )
+    container.task_executor = task_executor
+    container.context_manager = task_context_manager
     app.state.task_executor = task_executor
     app.state.context_manager = task_context_manager
 
     # 关键持久化失败通过 PG DeadLetter 重试；PG 不可用时队列自动退回内存。
     from app.harness.dead_letter import dead_letter_queue
-    dead_letter_queue.configure(getattr(app.state, "store", None))
+    dead_letter_queue.configure(container.store)
+    container.dead_letter_queue = dead_letter_queue
 
     async def _retry_snapshot(args):
         await task_repository.save(TaskSnapshot.from_dict(args["snapshot"]))
@@ -182,7 +202,8 @@ async def lifespan(app: FastAPI):
     dead_letter_queue.register_retry_handler("task_journal_append", _retry_journal)
 
     from app.memory.semantic_memory import semantic_memory
-    semantic_memory.configure(getattr(app.state, "store", None))
+    semantic_memory.configure(container.store)
+    container.semantic_memory = semantic_memory
 
     # ── 7. SkillManager ─────────────────────────────
     from app.skill.skill_manager import skill_manager
@@ -202,6 +223,7 @@ async def lifespan(app: FastAPI):
     # ── 9. 事件总线 ─────────────────────────────────
     from app.harness.event_bus import event_bus
     from app.common.redis import get_redis
+    container.event_bus = event_bus
     app.state.event_bus = event_bus  # 与 task_executor 引用的同一单例
     try:
         redis_client = await get_redis()
@@ -218,6 +240,7 @@ async def lifespan(app: FastAPI):
     tools_dir = Path(__file__).resolve().parent.parent / "tool"
     hot_reloader = ToolHotReloader(tools_dir, on_reload=lambda: _rebuild_agents(app))
     await hot_reloader.start()
+    container.tool_hot_reloader = hot_reloader
     app.state.tool_hot_reloader = hot_reloader
 
     # ── 12. SubAgent 热加载 ──────────────────────────
@@ -225,6 +248,7 @@ async def lifespan(app: FastAPI):
     specialists_dir = Path(__file__).resolve().parent.parent / "subagents"
     sa_reloader = SubAgentHotReloader(specialists_dir, on_reload=lambda: _rebuild_agents(app))
     await sa_reloader.start()
+    container.subagent_hot_reloader = sa_reloader
     app.state.subagent_hot_reloader = sa_reloader
 
     # ── 13. 恢复后台任务 ────────────────────────────
@@ -244,6 +268,7 @@ async def lifespan(app: FastAPI):
         await pg_store_manager.close()
     if neo4j_manager.available:
         await neo4j_manager.close()
+    clear_application_container(container)
 
 
 app = FastAPI(title="APIs Agent", lifespan=lifespan)
