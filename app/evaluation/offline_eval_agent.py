@@ -82,7 +82,9 @@ def build_metrics():
 async def run_case(golden: dict, metrics: list) -> dict:
     """执行单条 Agent 评估用例。"""
     from deepeval.test_case import ConversationalTestCase, Turn
-    from app.agent.triage_agent import TriageAgent
+    from app.agent.agent_factory import create_triage_agent
+    from app.common.streaming import extract_text_content
+    from app.prompt.triage_prompt import build_triage_prompt
 
     turns = golden.get("turns", [])
     test_turns = []
@@ -92,18 +94,27 @@ async def run_case(golden: dict, metrics: list) -> dict:
             continue
 
         session_id = f"eval_{uuid.uuid4().hex[:8]}"
-        agent = TriageAgent(session_id, turn["content"])
+        agent = await create_triage_agent(system_prompt=build_triage_prompt())
         output_text = ""
         tool_names = []
 
         try:
-            async for event in agent.run():
-                if isinstance(event, dict):
-                    t = event.get("type", "")
-                    if t == "text":
-                        output_text += event.get("content", "")
-                    elif t == "tool_start":
-                        tool_names.append(event.get("toolName", ""))
+            async for event in agent.astream_events(
+                {"messages": [{"role": "user", "content": turn["content"]}]},
+                version="v2",
+                config={
+                    "recursion_limit": 100,
+                    "configurable": {"thread_id": session_id},
+                },
+            ):
+                event_type = event.get("event", "")
+                if event_type == "on_tool_start":
+                    tool_names.append(event.get("name", ""))
+                elif event_type == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    output_text += extract_text_content(
+                        getattr(chunk, "content", "")
+                    )
         except Exception as e:
             logger.warning(f"Agent 执行异常: {e}")
             output_text = str(e)

@@ -7,6 +7,7 @@ import uuid
 from langchain_core.tools import tool
 
 from app.tool.registry import register_tool
+from app.harness.task_context import task_context_manager
 
 logger = logging.getLogger("apis")
 
@@ -99,7 +100,12 @@ async def _request_confirmation(command: str) -> bool:
     """请求用户确认危险命令。超时 120 秒默认拒绝。"""
     confirm_id = uuid.uuid4().hex[:8]
     event = asyncio.Event()
-    _pending[confirm_id] = {"event": event, "approved": False, "command": command}
+    _pending[confirm_id] = {
+        "event": event,
+        "approved": False,
+        "command": command,
+        "user_id": task_context_manager.get().user_id,
+    }
 
     if _side_queue is not None:
         await _side_queue.put({"type": "confirm_shell", "confirmId": confirm_id, "command": command})
@@ -113,10 +119,10 @@ async def _request_confirmation(command: str) -> bool:
         _pending.pop(confirm_id, None)
 
 
-def resolve_confirmation(confirm_id: str, approved: bool):
+def resolve_confirmation(confirm_id: str, approved: bool, user_id: str = ""):
     """API 端点调用此函数来确认/拒绝命令。"""
     entry = _pending.get(confirm_id)
-    if entry:
+    if entry and (not entry.get("user_id") or entry.get("user_id") == user_id):
         entry["approved"] = approved
         entry["event"].set()
         return True

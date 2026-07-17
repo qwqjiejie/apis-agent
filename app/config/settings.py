@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     server_host: str = "0.0.0.0"
     server_port: int = 8080
     log_level: str = "INFO"
+    jwt_secret: str = ""
 
     # Agent 配置
     max_agent_iterations: int = 5

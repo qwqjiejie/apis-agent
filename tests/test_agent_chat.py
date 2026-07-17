@@ -10,6 +10,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.api.routes import agent as agent_routes
+from app.auth import generate_token
 
 
 class FakeStreamingAgent:
@@ -73,6 +74,7 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
 
     test_app = FastAPI()
     test_app.include_router(agent_routes.router, prefix="/api/v1")
+    test_app.include_router(agent_routes.chat_router, prefix="/api/v1")
     test_app.state.agent = fake_agent
 
     monkeypatch.setattr(
@@ -88,7 +90,7 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
 
     with TestClient(test_app) as client:
         response = client.post(
-            "/api/v1/agent/chat",
+            "/api/v1/chat",
             json={"message": "今天天气"},
             headers={"X-Anonymous-Id": "v1-test-user"},
         )
@@ -111,6 +113,7 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
     assert "recursion_limit" not in fake_agent.config["configurable"]
     assert fake_agent.config["configurable"]["user_id"] == "anon_v1-test-user"
     assert len(saved_messages) == 1
+    assert saved_messages[0][0][3] == "anon_v1-test-user"
 
 
 def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
@@ -137,7 +140,11 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
     )
     monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="代号测试"))
     monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
-    monkeypatch.setattr(agent_routes.store, "get_session_owner", lambda session_id: "")
+    monkeypatch.setattr(
+        agent_routes.store,
+        "get_session_owner",
+        lambda session_id: "anon_v5-test-user",
+    )
     monkeypatch.setattr(agent_routes.store, "touch_last_active", lambda session_id: None)
     monkeypatch.setattr(agent_routes.semantic_memory, "search", AsyncMock(return_value=[]))
     monkeypatch.setattr(agent_routes.semantic_memory, "add", AsyncMock())
@@ -206,3 +213,29 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
         conversation_id,
         conversation_id,
     ]
+
+
+def test_v7_user_cannot_access_another_users_conversation(monkeypatch):
+    fake_agent = FakeStreamingAgent()
+    test_app = FastAPI()
+    test_app.include_router(agent_routes.chat_router, prefix="/api/v1")
+    test_app.state.agent = fake_agent
+
+    monkeypatch.setattr(
+        agent_routes.store,
+        "get_session_owner",
+        lambda session_id: "user_a",
+    )
+
+    with TestClient(test_app) as client:
+        response = client.post(
+            "/api/v1/chat",
+            json={
+                "message": "读取上一轮内容",
+                "conversationId": "session_owned_by_a",
+            },
+            headers={"Authorization": f"Bearer {generate_token('user_b')}"},
+        )
+
+    assert response.json()["code"] == 403
+    assert fake_agent.inputs is None

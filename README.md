@@ -4,15 +4,15 @@
 
 ## 核心特性
 
-- **双层 DeepAgent 架构** — TriageAgent（分流）+ ExecutorAgent（后台执行），启动时创建单例，热加载原子替换
+- **双层 DeepAgent 架构** — Triage DeepAgent（分流）+ ExecutorAgent（后台执行），启动时创建单例，热加载原子替换
 - **原生 SubAgent 机制** — deepagents 框架内置 `SubAgentMiddleware`，LLM 通过 `task` 工具原生 spawn 子代理，独立 tools + 独立上下文
-- **声明式扩展** — 在 `agent/specialist/<name>/AGENT.md` 中声明 name/description/allowed_tools，系统自动发现注入
+- **声明式扩展** — 在 `app/subagents/<name>/AGENT.md` 中声明 name/description/allowed_tools，系统自动发现注入
 - **LLM 自路由** — 不依赖外部分类器，LLM 通过 Function Calling 自主判断：直接回答 / spawn Specialist / 创建后台任务
 - **能力前缀** — 前端通过 `生成ppt:` / `深度研究:` / `分析文档:` 等前缀传递能力选择
 - **模型网关 + 熔断器** — 多模型注册、三态熔断、后台健康探活、零停机热切换
 - **后台任务引擎** — 完整的 TaskExecutor：submit/cancel/HITL 挂起恢复/审批兜底/死信重试
 - **RAG 检索流水线** — 查询重写 → 多路召回 + RRF 融合 → 动态 TopK → LLM 相关性过滤
-- **语义长期记忆** — PgVector 跨会话记忆，自动向量化检索历史偏好
+- **语义长期记忆** — PostgreSQL Store 跨会话持久化，按用户隔离并自动向量化检索
 - **Skills 管理体系** — DB 生命周期管理 + zip 上传 + 启用/禁用 + 定时同步
 - **知识图谱增强** — Neo4j Graph RAG（可选，未配置自动降级）
 - **多层降级容错** — PostgreSQL/Redis/MinIO/Milvus/Neo4j 不可用时自动降级
@@ -122,7 +122,7 @@ python app/main.py
 ## 架构总览
 
 ```
-POST /api/v1/agent/chat  {"message":"生成ppt: AI趋势"}
+POST /api/v1/chat  {"message":"生成ppt: AI趋势"}
        │
        ▼
 ┌──────────────────────────────┐
@@ -155,7 +155,7 @@ POST /api/v1/agent/chat  {"message":"生成ppt: AI趋势"}
 1. 构建 ModelGateway → 注册主模型 + 降级模型 + 健康探活
 2. PG Store 初始化 → checkpointer + store (AsyncPostgresSaver + AsyncPostgresStore)
 3. MinIO 初始化
-4. 扫描 agent/specialist/*/AGENT.md → 构建 SubAgent 列表
+4. 扫描 app/subagents/*/AGENT.md → 构建 SubAgent 列表
 5. create_triage_agent() → app.state.agent (单例)
 6. create_executor_agent() → app.state.executor_agent (单例)
 7. TaskExecutor 注入 executor_agent
@@ -197,7 +197,7 @@ specialist/*/AGENT.md 变更
 
 | 端点 | 用途 |
 |------|------|
-| `/api/v1/agent/chat` | 统一对话入口（唯一） |
+| `/api/v1/chat` | 统一对话入口（`/api/v1/agent/chat` 为兼容别名） |
 | `/api/v1/agent/pptx/download` | PPT 文件下载 |
 | `/api/v1/agent/stop` | 停止运行中的 Agent |
 | `/api/v1/agent/shell/confirm` | Shell 命令安全确认 |
@@ -269,17 +269,15 @@ apis-agent/
 │   │
 │   ├── agent/                      # Agent 编排层
 │   │   ├── agent_factory.py        # create_triage_agent / create_executor_agent
-│   │   ├── middleware.py           # ToolRetry / ToolCallLimit / ModelRetry
-│   │   ├── base_agent.py           # BaseAgent (锁/历史/压缩)
-│   │   ├── triage_agent.py         # TriageAgent (后台任务包装)
-│   │   ├── executor_agent.py       # ExecutorAgent (后台任务执行)
-│   │   └── specialist/             # SubAgent 声明式定义 (AGENT.md)
-│   │       ├── ppt/
-│   │       ├── research/
-│   │       ├── file_analysis/
-│   │       ├── data_analysis/
-│   │       ├── code_review/
-│   │       └── coding/
+│   │   └── executor_agent.py       # ExecutorAgent (后台任务执行)
+│   │
+│   ├── subagents/                  # SubAgent 声明式定义 (AGENT.md)
+│   │   ├── ppt/
+│   │   ├── research/
+│   │   ├── file_analysis/
+│   │   ├── data_analysis/
+│   │   ├── code_review/
+│   │   └── coding/
 │   │
 │   ├── gateway/                    # 模型网关
 │   │   ├── model_gateway.py        # 注册/路由/熔断/探活/热切换
@@ -290,7 +288,7 @@ apis-agent/
 │   │
 │   ├── harness/                    # 子代理编排
 │   │   ├── task_executor.py        # 后台任务执行引擎
-│   │   ├── task_context.py         # TaskSnapshot / TaskStatus / JournalEntry
+│   │   ├── task_context.py         # ChatContext / TaskSnapshot / Journal / Store
 │   │   ├── event_bus.py            # EventBus (Redis Pub/Sub + 内存降级)
 │   │   ├── dead_letter.py          # DeadLetterQueue
 │   │   ├── subagent_discovery.py   # AGENT.md 扫描解析
@@ -379,7 +377,7 @@ pytest tests/ -v
 
 ### 新增 Specialist 子代理
 
-在 `app/agent/specialist/<name>/` 下创建 `AGENT.md`——无需写代码，系统自动发现：
+在 `app/subagents/<name>/` 下创建 `AGENT.md`——无需写代码，系统自动发现：
 
 ```markdown
 ---

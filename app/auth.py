@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import uuid
@@ -23,10 +24,15 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Request
 
+from app.config.settings import get_settings
+
 logger = logging.getLogger("apis")
 
 # 简单 JWT 实现（不引入第三方库，避免额外依赖）
-_JWT_SECRET = os.environ.get("JWT_SECRET", uuid.uuid4().hex)
+_JWT_SECRET = get_settings().jwt_secret or os.environ.get("JWT_SECRET", "")
+if not _JWT_SECRET:
+    _JWT_SECRET = uuid.uuid4().hex
+    logger.warning("JWT_SECRET 未配置，登录令牌将在服务重启后失效")
 _JWT_EXPIRE_HOURS = 72
 
 
@@ -54,7 +60,11 @@ def generate_token(user_id: str, username: str = "") -> str:
         "exp": int((datetime.now(timezone.utc) + timedelta(hours=_JWT_EXPIRE_HOURS)).timestamp()),
     }).encode())
     signature = _base64url_encode(
-        hashlib.sha256(f"{header}.{payload}.{_JWT_SECRET}".encode()).digest()
+        hmac.new(
+            _JWT_SECRET.encode(),
+            f"{header}.{payload}".encode(),
+            hashlib.sha256,
+        ).digest()
     )
     return f"{header}.{payload}.{signature}"
 
@@ -68,9 +78,13 @@ def verify_token(token: str) -> dict | None:
             return None
         header, payload, signature = parts
         expected_sig = _base64url_encode(
-            hashlib.sha256(f"{header}.{payload}.{_JWT_SECRET}".encode()).digest()
+            hmac.new(
+                _JWT_SECRET.encode(),
+                f"{header}.{payload}".encode(),
+                hashlib.sha256,
+            ).digest()
         )
-        if signature != expected_sig:
+        if not hmac.compare_digest(signature, expected_sig):
             return None
         data = json.loads(_base64url_decode(payload))
         exp = data.get("exp", 0)

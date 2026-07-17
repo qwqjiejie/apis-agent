@@ -1,10 +1,60 @@
 """任务上下文模型 — TaskSnapshot, TaskStatus, JournalEntry, TaskStore。"""
 
 import asyncio
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Protocol
+
+
+@dataclass(frozen=True)
+class ChatContext:
+    """贯穿 HTTP、Agent、工具和后台任务的身份上下文。"""
+
+    user_id: str = ""
+    session_id: str = ""
+    task_id: str = ""
+    trace_id: str = ""
+
+    def configurable(self) -> dict[str, str]:
+        return {
+            "thread_id": self.session_id,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+        }
+
+
+class TaskContextManager:
+    """基于 ContextVar 的并发安全请求/任务上下文管理器。"""
+
+    def __init__(self):
+        self._current: ContextVar[ChatContext] = ContextVar(
+            "apis_task_context",
+            default=ChatContext(),
+        )
+
+    def get(self) -> ChatContext:
+        return self._current.get()
+
+    def set(self, context: ChatContext) -> Token[ChatContext]:
+        return self._current.set(context)
+
+    def reset(self, token: Token[ChatContext]) -> None:
+        self._current.reset(token)
+
+    @contextmanager
+    def bind(self, context: ChatContext):
+        token = self.set(context)
+        try:
+            yield context
+        finally:
+            self.reset(token)
+
+
+task_context_manager = TaskContextManager()
 
 
 class TaskStatus(str, Enum):
@@ -124,8 +174,19 @@ class JournalEntry:
             "timestamp": self.timestamp,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "JournalEntry":
+        return cls(
+            step=int(data.get("step", 0)),
+            event=str(data.get("event", "")),
+            description=str(data.get("description", "")),
+            detail=dict(data.get("detail", {}) or {}),
+            timestamp=str(data.get("timestamp", "")),
+        )
+
 
 TASK_NAMESPACE = ("tasks",)
+JOURNAL_NAMESPACE = ("task_journals",)
 TASK_SEARCH_LIMIT = 1000
 
 
@@ -142,6 +203,16 @@ class TaskStore(Protocol):
 
     async def list_by_session(self, session_id: str) -> list[TaskSnapshot]: ...
 
+    async def append_journal(
+        self,
+        task_id: str,
+        event: str,
+        description: str,
+        detail: dict | None = None,
+    ) -> JournalEntry: ...
+
+    async def read_journal(self, task_id: str) -> list[JournalEntry]: ...
+
     async def delete(self, task_id: str) -> None: ...
 
 
@@ -150,6 +221,7 @@ class MemoryTaskStore:
 
     def __init__(self):
         self._tasks: dict[str, TaskSnapshot] = {}
+        self._journals: dict[str, list[JournalEntry]] = {}
         self._lock = asyncio.Lock()
 
     async def save(self, snapshot: TaskSnapshot) -> None:
@@ -170,12 +242,38 @@ class MemoryTaskStore:
     async def delete(self, task_id: str) -> None:
         async with self._lock:
             self._tasks.pop(task_id, None)
+            self._journals.pop(task_id, None)
 
     async def list_by_status(self, status: TaskStatus) -> list[TaskSnapshot]:
         return [t for t in await self.list_tasks() if t.status == status]
 
     async def list_by_session(self, session_id: str) -> list[TaskSnapshot]:
         return [t for t in await self.list_tasks() if t.conversation_id == session_id]
+
+    async def append_journal(
+        self,
+        task_id: str,
+        event: str,
+        description: str,
+        detail: dict | None = None,
+    ) -> JournalEntry:
+        async with self._lock:
+            entries = self._journals.setdefault(task_id, [])
+            entry = JournalEntry(
+                step=len(entries) + 1,
+                event=event,
+                description=description,
+                detail=detail,
+            )
+            entries.append(entry)
+            return JournalEntry.from_dict(entry.to_dict())
+
+    async def read_journal(self, task_id: str) -> list[JournalEntry]:
+        async with self._lock:
+            return [
+                JournalEntry.from_dict(entry.to_dict())
+                for entry in self._journals.get(task_id, [])
+            ]
 
 
 class PgTaskStore:
@@ -253,8 +351,51 @@ class PgTaskStore:
             reverse=True,
         )
 
+    async def append_journal(
+        self,
+        task_id: str,
+        event: str,
+        description: str,
+        detail: dict | None = None,
+    ) -> JournalEntry:
+        entries = await self.read_journal(task_id)
+        entry = JournalEntry(
+            step=len(entries) + 1,
+            event=event,
+            description=description,
+            detail=detail,
+        )
+        key = f"{entry.timestamp}_{uuid.uuid4().hex}"
+        await self._store.aput(
+            JOURNAL_NAMESPACE + (task_id,),
+            key,
+            entry.to_dict(),
+            index=False,
+        )
+        return entry
+
+    async def read_journal(self, task_id: str) -> list[JournalEntry]:
+        items = await self._store.asearch(
+            JOURNAL_NAMESPACE + (task_id,),
+            limit=TASK_SEARCH_LIMIT,
+        )
+        entries = [
+            JournalEntry.from_dict(item.value)
+            for item in items
+            if isinstance(item.value, dict)
+        ]
+        return sorted(entries, key=lambda entry: (entry.step, entry.timestamp))
+
     async def delete(self, task_id: str) -> None:
         await self._store.adelete(TASK_NAMESPACE, task_id)
+        items = await self._store.asearch(
+            JOURNAL_NAMESPACE + (task_id,),
+            limit=TASK_SEARCH_LIMIT,
+        )
+        for item in items:
+            key = getattr(item, "key", "")
+            if key:
+                await self._store.adelete(JOURNAL_NAMESPACE + (task_id,), key)
 
 
 task_store: TaskStore = MemoryTaskStore()

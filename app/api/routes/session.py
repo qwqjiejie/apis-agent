@@ -35,21 +35,28 @@ async def create_session():
 
 @router.post("/list")
 async def list_sessions(req: SessionListRequest, request: Request):
-    user_id = req.userId or get_current_user_id(request)
+    user_id = get_current_user_id(request)
     records, total = store.list_sessions(page=req.pageNum, size=req.pageSize, user_id=user_id)
     return ok_paged(records, total, req.pageNum, req.pageSize)
 
 
 @router.post("/detail")
-async def get_session(req: SessionDetailRequest):
+async def get_session(req: SessionDetailRequest, request: Request):
     session = store.get_session(req.conversationId)
     if not session:
         return error(404, "会话不存在")
+    if store.get_session_owner(req.conversationId) != get_current_user_id(request):
+        return error(403, "无权访问该会话")
     return ok(session)
 
 
 @router.post("/delete")
-async def delete_session(req: SessionDeleteRequest):
+async def delete_session(req: SessionDeleteRequest, request: Request):
+    owner = store.get_session_owner(req.conversationId)
+    if owner is None:
+        return error(404, "会话不存在")
+    if owner != get_current_user_id(request):
+        return error(403, "无权访问该会话")
     ok_deleted = store.delete_session(req.conversationId)
     if not ok_deleted:
         return error(404, "会话不存在")

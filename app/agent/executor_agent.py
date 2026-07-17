@@ -11,6 +11,7 @@ import logging
 from langgraph.types import Command
 
 from app.common.streaming import extract_text_content, make_event, make_sse
+from app.harness.task_context import ChatContext, task_context_manager
 
 logger = logging.getLogger("apis")
 
@@ -50,6 +51,13 @@ class ExecutorAgent:
         # 复用 lifespan 注入的单例，该图已绑定 checkpointer/store/HITL middleware。
         from app.harness.task_executor import task_executor
 
+        parent_context = task_context_manager.get()
+        task_context_manager.set(ChatContext(
+            user_id=self.snapshot.user_id or parent_context.user_id,
+            session_id=self.snapshot.session_id or self.snapshot.conversation_id,
+            task_id=self.snapshot.task_id,
+            trace_id=parent_context.trace_id,
+        ))
         try:
             agent = task_executor.executor_agent
             if agent is None:
@@ -114,6 +122,8 @@ class ExecutorAgent:
             self.snapshot.error = str(e)
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
             yield {"_task_status": "failed"}
+        finally:
+            task_context_manager.set(parent_context)
 
 
 def _build_resume_command(resume_data: dict) -> Command:

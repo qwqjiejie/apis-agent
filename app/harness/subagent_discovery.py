@@ -5,7 +5,7 @@ from pathlib import Path
 
 logger = logging.getLogger("apis")
 
-SPECIALIST_DIR = Path(__file__).resolve().parent.parent / "agent" / "specialist"
+SPECIALIST_DIR = Path(__file__).resolve().parent.parent / "subagents"
 
 
 def _parse_agent_md(filepath: Path) -> dict | None:
@@ -42,7 +42,7 @@ def _parse_agent_md(filepath: Path) -> dict | None:
 
 
 def discover_specialists() -> list[dict]:
-    """扫描 specialist/ 目录，返回所有已发现的子 Agent 定义。"""
+    """扫描 subagents/ 目录，返回所有已发现的子 Agent 定义。"""
     if not SPECIALIST_DIR.is_dir():
         return []
 

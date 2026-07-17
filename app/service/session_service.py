@@ -54,11 +54,11 @@ class Store(BaseStore):
             ],
         }
 
-    def get_session_owner(self, session_id: str) -> str:
-        """返回会话归属用户 ID（取最新一条消息的 user_id）。"""
+    def get_session_owner(self, session_id: str) -> str | None:
+        """返回会话归属；None 表示会话不存在，空字符串表示历史脏数据。"""
         rows = self._repo().find_by_session_id(session_id, limit=1)
         if not rows:
-            return ""
+            return None
         return rows[-1].user_id or ""
 
     def touch_last_active(self, session_id: str):

@@ -7,7 +7,7 @@ from typing import TypedDict
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -35,17 +35,20 @@ class FakeLangGraphStore:
 
     async def asearch(self, namespace, *, filter=None, limit=10, **kwargs):
         values = [
-            value
-            for (item_namespace, _), value in self.data.items()
+            (key, value)
+            for (item_namespace, key), value in self.data.items()
             if item_namespace[:len(namespace)] == namespace
         ]
         if filter:
             values = [
-                value
-                for value in values
+                (key, value)
+                for key, value in values
                 if all(value.get(key) == expected for key, expected in filter.items())
             ]
-        return [SimpleNamespace(value=value) for value in values[:limit]]
+        return [
+            SimpleNamespace(key=key, value=value)
+            for key, value in values[:limit]
+        ]
 
     async def adelete(self, namespace, key):
         self.data.pop((namespace, key), None)
@@ -241,7 +244,12 @@ async def test_v4_resume_endpoint_continues_same_checkpoint(monkeypatch):
         async for event in wrapper.run():
             yield event
 
-    task_id = await executor.submit("session_v4", "需要审批后继续的任务", execute)
+    task_id = await executor.submit(
+        "session_v4",
+        "需要审批后继续的任务",
+        execute,
+        user_id="anon_v4-test-user",
+    )
 
     for _ in range(100):
         waiting = await executor.get_status(task_id)
@@ -252,7 +260,11 @@ async def test_v4_resume_endpoint_continues_same_checkpoint(monkeypatch):
         pytest.fail("任务未进入 waiting_human")
 
     response = await agent_routes.task_resume(
-        agent_routes.TaskResumeRequest(taskId=task_id, action="approved")
+        agent_routes.TaskResumeRequest(taskId=task_id, action="approved"),
+        Request({
+            "type": "http",
+            "headers": [(b"x-anonymous-id", b"v4-test-user")],
+        }),
     )
     assert json.loads(response.body)["code"] == 200
 
@@ -301,6 +313,98 @@ def test_v4_rejection_maps_to_deepagents_decision():
     }
 
 
+@pytest.mark.asyncio
+async def test_v6_waiting_task_resumes_after_executor_restart(monkeypatch):
+    class ApprovalState(TypedDict):
+        messages: list
+
+    resumed_values = []
+
+    def request_approval(state):
+        decision = interrupt({
+            "action_requests": [{
+                "name": "request_approval",
+                "args": {"approval_id": "approval_v6"},
+                "description": "重启恢复审批",
+            }],
+            "review_configs": [{
+                "action_name": "request_approval",
+                "allowed_decisions": ["approve", "reject"],
+            }],
+        })
+        resumed_values.append(decision)
+        return {"messages": state["messages"]}
+
+    builder = StateGraph(ApprovalState)
+    builder.add_node("request_approval", request_approval)
+    builder.add_edge(START, "request_approval")
+    builder.add_edge("request_approval", END)
+    checkpointer = InMemorySaver()
+    graph = builder.compile(checkpointer=checkpointer)
+
+    backend = FakeLangGraphStore()
+    repository = PgTaskStore(backend)
+    first_executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
+    first_executor.executor_agent = graph
+    monkeypatch.setattr(task_executor_module, "task_executor", first_executor)
+
+    async def execute(snapshot):
+        wrapper = ExecutorAgent(snapshot)
+        async for event in wrapper.run():
+            yield event
+
+    task_id = await first_executor.submit(
+        "session_v6",
+        "重启后继续审批",
+        execute,
+        user_id="user_v6",
+    )
+    for _ in range(100):
+        waiting = await first_executor.get_status(task_id, user_id="user_v6")
+        if waiting and waiting["status"] == TaskStatus.WAITING_HUMAN.value:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("重启前任务未挂起")
+
+    restarted_executor = TaskExecutor(
+        store=PgTaskStore(backend),
+        event_bus_instance=EventBus(),
+    )
+    restarted_executor.executor_agent = graph
+    monkeypatch.setattr(task_executor_module, "task_executor", restarted_executor)
+
+    assert await restarted_executor.recover_tasks() == 1
+    assert not await restarted_executor.resume(
+        task_id,
+        {"action": "approved"},
+        user_id="other_user",
+    )
+    assert await restarted_executor.resume(
+        task_id,
+        {"action": "approved"},
+        user_id="user_v6",
+    )
+
+    for _ in range(100):
+        completed = await restarted_executor.get_status(task_id, user_id="user_v6")
+        if completed and completed["status"] == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("重启后的 waiting_human 任务未完成")
+
+    assert resumed_values == [{"decisions": [{"type": "approve"}]}]
+    journal = await restarted_executor.read_journal(task_id)
+    assert [entry["event"] for entry in journal] == [
+        "created",
+        "executing",
+        "approval_requested",
+        "decision",
+        "completed",
+    ]
+
+
 def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
     repository = PgTaskStore(FakeLangGraphStore())
     executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
@@ -320,10 +424,11 @@ def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
     monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
 
     with TestClient(test_app) as client:
+        headers = {"X-Anonymous-Id": "v2-test-user"}
         response = client.post(
             "/api/v1/agent/chat",
             json={"message": "请完成一份需要多个专家协作的复杂研究报告"},
-            headers={"X-Anonymous-Id": "v2-test-user"},
+            headers=headers,
         )
         match = re.search(r"task_[0-9a-f]{12}", response.text)
         assert match is not None
@@ -332,12 +437,14 @@ def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
         status_response = client.post(
             "/api/v1/agent/task/status",
             json={"taskId": task_id},
+            headers=headers,
         )
         assert status_response.json()["data"]["status"] == TaskStatus.EXECUTING.value
 
         cancel_response = client.post(
             "/api/v1/agent/task/cancel",
             json={"taskId": task_id},
+            headers=headers,
         )
         assert cancel_response.json()["code"] == 200
 
@@ -345,6 +452,7 @@ def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
             status_response = client.post(
                 "/api/v1/agent/task/status",
                 json={"taskId": task_id},
+                headers=headers,
             )
             if status_response.json()["data"]["status"] == TaskStatus.CANCELLED.value:
                 break

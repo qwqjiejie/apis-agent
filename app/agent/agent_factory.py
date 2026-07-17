@@ -24,6 +24,8 @@ from langchain.agents.middleware import (
 
 from app.common.llm import _create_raw_llm
 from app.config.settings import get_settings
+from app.gateway.middleware import GatewayModelWrapper
+from app.gateway.types import ModelRole
 from app.harness.subagent_discovery import discover_specialists
 from app.tool import TOOL_REGISTRY
 
@@ -36,9 +38,8 @@ def _build_llm(gateway=None):
     if gateway is not None:
         chain = gateway.get_model_chain()
         if chain:
-            _, model = chain[0]
             logger.info(f"[AgentFactory] 网关模型: {chain[0][0]}")
-            return model
+            return GatewayModelWrapper(gateway, ModelRole.CHAT)
 
     llm = _create_raw_llm()
     model_name = get_settings().llm_model
@@ -54,7 +55,7 @@ def _build_llm(gateway=None):
 
 
 def _build_subagents_from_specialists() -> list[SubAgent]:
-    """从 agent/specialist/ 扫描 AGENT.md，构建 SubAgent 列表。
+    """从 app/subagents/ 扫描 AGENT.md，构建 SubAgent 列表。
 
     每个 SubAgent 拥有独立的 system_prompt 和 allowed_tools。
     LLM 通过 deepagents 内置的 ``task`` 工具原生 spawn 子代理。

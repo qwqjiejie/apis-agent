@@ -159,7 +159,7 @@ const CAPABILITY_PREFIX_MAP = {
 
 // 获取流式聊天 API URL（统一入口）
 const getStreamChatUrl = (backendUrl) => {
-    return `${backendUrl}/api/v1/agent/chat`;
+    return `${backendUrl}/api/v1/chat`;
 };
 
 // 构建能力前缀消息

@@ -7,12 +7,14 @@
 
 后端支持：
 - 内存模式（默认，无外部依赖）
-- PgVector 模式（需安装 pgvector 扩展，生产环境推荐）
+- LangGraph PostgreSQL Store（生产模式，服务重启后可恢复）
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger("apis")
@@ -20,6 +22,8 @@ logger = logging.getLogger("apis")
 _MEMORY_DIM = 1024
 _DEFAULT_TOP_K = 5
 _DEFAULT_THRESHOLD = 0.7
+_MEMORY_NAMESPACE = ("semantic_memories",)
+_MAX_MEMORIES_PER_USER = 200
 
 
 class SemanticMemoryStore:
@@ -37,8 +41,13 @@ class SemanticMemoryStore:
         self._top_k = top_k
         self._threshold = threshold
         self._memories: dict[str, list[dict]] = {}  # user_id → [{q, a, embedding}]
-        self._vector_store = None  # PgVector 客户端（升级路径）
-        self._available = backend == "memory"
+        self._store = None
+        self._available = True
+
+    def configure(self, store=None) -> None:
+        """注入 LangGraph Store；为空时使用进程内降级存储。"""
+        self._store = store
+        self._backend = "pg" if store is not None else "memory"
 
     @property
     def available(self) -> bool:
@@ -46,7 +55,7 @@ class SemanticMemoryStore:
 
     async def add(self, user_id: str, question: str, answer: str):
         """添加一条 QA 记忆。"""
-        if not question or not answer:
+        if not user_id or not question or not answer:
             return
 
         embedding = self._embed_text(question[:500])
@@ -54,18 +63,34 @@ class SemanticMemoryStore:
             return
 
         entry = {
+            "id": f"memory_{uuid.uuid4().hex}",
+            "user_id": user_id,
             "question": question[:500],
             "answer": answer[:500],
             "embedding": embedding,
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        if self._store is not None:
+            try:
+                await self._store.aput(
+                    _MEMORY_NAMESPACE + (user_id,),
+                    entry["id"],
+                    entry,
+                    index=False,
+                )
+                await self._trim_pg_memories(user_id)
+                logger.debug(f"[SemanticMemory] PG 已存储: user={user_id}")
+                return
+            except Exception as exc:
+                logger.warning(f"[SemanticMemory] PG 写入失败，转内存降级: {exc}")
 
         if user_id not in self._memories:
             self._memories[user_id] = []
         self._memories[user_id].append(entry)
 
-        # 限制每个用户最多 200 条记忆
-        if len(self._memories[user_id]) > 200:
-            self._memories[user_id] = self._memories[user_id][-200:]
+        if len(self._memories[user_id]) > _MAX_MEMORIES_PER_USER:
+            self._memories[user_id] = self._memories[user_id][-_MAX_MEMORIES_PER_USER:]
 
         logger.debug(f"[SemanticMemory] 已存储: user={user_id}, total={len(self._memories[user_id])}")
 
@@ -75,7 +100,7 @@ class SemanticMemoryStore:
         Returns:
             [{"question": "...", "answer": "...", "score": 0.95}, ...]
         """
-        if not self._available or user_id not in self._memories:
+        if not self._available or not user_id:
             return []
 
         k = top_k or self._top_k
@@ -83,7 +108,7 @@ class SemanticMemoryStore:
         if query_emb is None:
             return []
 
-        entries = self._memories.get(user_id, [])
+        entries = await self._load_entries(user_id)
         if not entries:
             return []
 
@@ -106,6 +131,55 @@ class SemanticMemoryStore:
         if result:
             logger.debug(f"[SemanticMemory] 检索命中: user={user_id}, top={result[0]['score']:.3f}")
         return result
+
+    async def _load_entries(self, user_id: str) -> list[dict]:
+        entries: list[dict] = []
+        if self._store is not None:
+            try:
+                items = await self._store.asearch(
+                    _MEMORY_NAMESPACE + (user_id,),
+                    limit=_MAX_MEMORIES_PER_USER,
+                )
+                entries.extend(
+                    dict(item.value)
+                    for item in items
+                    if isinstance(item.value, dict)
+                )
+            except Exception as exc:
+                logger.warning(f"[SemanticMemory] PG 读取失败，使用内存降级: {exc}")
+        entries.extend(self._memories.get(user_id, []))
+        return entries
+
+    async def _trim_pg_memories(self, user_id: str) -> None:
+        items = await self._store.asearch(
+            _MEMORY_NAMESPACE + (user_id,),
+            limit=_MAX_MEMORIES_PER_USER + 50,
+        )
+        if len(items) <= _MAX_MEMORIES_PER_USER:
+            return
+        ordered = sorted(
+            items,
+            key=lambda item: item.value.get("created_at", "")
+            if isinstance(item.value, dict)
+            else "",
+        )
+        for item in ordered[:-_MAX_MEMORIES_PER_USER]:
+            key = getattr(item, "key", "")
+            if key:
+                await self._store.adelete(_MEMORY_NAMESPACE + (user_id,), key)
+
+    async def delete_user(self, user_id: str) -> None:
+        self._memories.pop(user_id, None)
+        if self._store is None:
+            return
+        items = await self._store.asearch(
+            _MEMORY_NAMESPACE + (user_id,),
+            limit=_MAX_MEMORIES_PER_USER + 50,
+        )
+        for item in items:
+            key = getattr(item, "key", "")
+            if key:
+                await self._store.adelete(_MEMORY_NAMESPACE + (user_id,), key)
 
     def build_context_injection(self, memories: list[dict]) -> str:
         """将检索到的记忆构建为可注入上下文的文本。"""

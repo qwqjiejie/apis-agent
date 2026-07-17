@@ -1,4 +1,4 @@
-"""SubAgentHotReloader — 监听 specialist/ 目录，AGENT.md 变更时触发 Agent 重建。"""
+"""SubAgentHotReloader — 监听 subagents/ 目录，AGENT.md 变更时触发 Agent 重建。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ logger = logging.getLogger("apis")
 
 
 class SubAgentHotReloader:
-    """监听 agent/specialist/ 目录，AGENT.md 变更时触发 Agent 重建。"""
+    """监听 subagents/ 目录，AGENT.md 变更时触发 Agent 重建。"""
 
     def __init__(self, subagents_dir: Path, on_reload: Callable[[], Awaitable[None]]):
         self._subagents_dir = subagents_dir

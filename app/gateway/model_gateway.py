@@ -71,10 +71,6 @@ class ModelGateway:
             result.append((name, self._models[name]))
             seen.add(name)
 
-        # 兜底：活跃模型即使熔断也加入
-        if self._active and self._active not in seen and self._active in self._models:
-            result.append((self._active, self._models[self._active]))
-
         return result
 
     def get_active_name(self) -> str | None:

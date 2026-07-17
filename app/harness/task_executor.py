@@ -21,6 +21,7 @@ from app.harness.task_context import (
     TaskSnapshot,
     TaskStatus,
     TaskStore,
+    task_context_manager,
     task_store,
 )
 from app.harness.event_bus import event_bus
@@ -63,7 +64,14 @@ class TaskExecutor:
 
     # ── 对外接口 ──────────────────────────────────
 
-    async def submit(self, conversation_id: str, query: str, execute_fn) -> str:
+    async def submit(
+        self,
+        conversation_id: str,
+        query: str,
+        execute_fn,
+        *,
+        user_id: str = "",
+    ) -> str:
         if self._draining:
             raise RuntimeError("任务执行器正在关闭，不接受新任务")
 
@@ -74,15 +82,18 @@ class TaskExecutor:
             query=query,
             goal=query,
             session_id=conversation_id,
+            user_id=user_id or task_context_manager.get().user_id,
             status=TaskStatus.CREATED,
         )
-        await self._store.save(snapshot)
+        await self._save_snapshot(snapshot)
+        await self._write_journal(task_id, "created", f"任务已创建: {query[:200]}")
         await self._event_bus.publish("task.created", snapshot.to_dict())
 
         async def _run():
             try:
                 snapshot.status = TaskStatus.EXECUTING
-                await self._store.save(snapshot)
+                await self._save_snapshot(snapshot)
+                await self._write_journal(task_id, "executing", "任务开始执行")
                 await self._event_bus.publish("task.executing", snapshot.to_dict())
                 await self._drive(snapshot, lambda: execute_fn(snapshot))
             finally:
@@ -95,14 +106,24 @@ class TaskExecutor:
         logger.info(f"[TaskExecutor] 任务已提交: {task_id}, query={query[:60]}")
         return task_id
 
-    async def resume(self, task_id: str, resume_data: dict) -> bool:
+    async def resume(
+        self,
+        task_id: str,
+        resume_data: dict,
+        *,
+        user_id: str = "",
+    ) -> bool:
         """恢复挂起的任务（HITL 审批完成）。"""
         action = resume_data.get("action", "approved")
         if action not in {"approved", "rejected"}:
             raise ValueError(f"不支持的审批动作: {action}")
 
         snapshot = await self._store.get(task_id)
-        if not snapshot or snapshot.status != TaskStatus.WAITING_HUMAN:
+        if (
+            not snapshot
+            or not self._is_owned_by(snapshot, user_id)
+            or snapshot.status != TaskStatus.WAITING_HUMAN
+        ):
             return False
 
         logger.info(f"[TaskExecutor] 恢复任务: {task_id}, action={action}")
@@ -112,7 +133,13 @@ class TaskExecutor:
         snapshot.recovery_hint = ""
         snapshot.error = ""
         snapshot.error_message = ""
-        await self._store.save(snapshot)
+        await self._save_snapshot(snapshot)
+        await self._write_journal(
+            task_id,
+            "decision",
+            f"人工审批: {action}",
+            {"action": action, "comment": resume_data.get("comment", "")},
+        )
         await self._event_bus.publish("task.resumed", snapshot.to_dict())
 
         async def _resume():
@@ -157,7 +184,13 @@ class TaskExecutor:
                         payload.get("approval_id") or snapshot.approval_id
                     )
                     self._update_result(snapshot, parts)
-                    await self._store.save(snapshot)
+                    await self._save_snapshot(snapshot)
+                    await self._write_journal(
+                        task_id,
+                        "approval_requested",
+                        "任务等待人工审批",
+                        {"approval_id": snapshot.approval_id},
+                    )
                     await self._event_bus.publish("task.interrupted", snapshot.to_dict())
                     self._unhandled_approval.pop(task_id, None)
                     return
@@ -212,15 +245,16 @@ class TaskExecutor:
 
     async def _persist_terminal(self, snapshot: TaskSnapshot) -> None:
         snapshot.updated_at = datetime.now(timezone.utc).isoformat()
-        await self._store.save(snapshot)
+        await self._save_snapshot(snapshot)
 
         event_name = f"task.{snapshot.status.value}"
+        description = {
+            TaskStatus.COMPLETED: f"任务完成: {snapshot.result_summary[:200]}",
+            TaskStatus.FAILED: f"任务失败: {snapshot.error_message[:200]}",
+            TaskStatus.CANCELLED: "任务已取消",
+        }.get(snapshot.status, f"任务状态变更: {snapshot.status.value}")
+        await self._write_journal(snapshot.task_id, snapshot.status.value, description)
         if snapshot.status == TaskStatus.COMPLETED:
-            await self._write_journal(
-                snapshot.task_id,
-                "completed",
-                f"任务完成: {snapshot.result_summary[:200]}",
-            )
             logger.info(f"[TaskExecutor] 任务完成: {snapshot.task_id}")
         await self._event_bus.publish(event_name, snapshot.to_dict())
 
@@ -235,9 +269,9 @@ class TaskExecutor:
         self._msg_counts.pop(task_id, None)
         self._unhandled_approval.pop(task_id, None)
 
-    async def cancel(self, task_id: str) -> bool:
+    async def cancel(self, task_id: str, *, user_id: str = "") -> bool:
         snapshot = await self._store.get(task_id)
-        if not snapshot:
+        if not snapshot or not self._is_owned_by(snapshot, user_id):
             return False
 
         live_snapshot = self._live_snapshots.get(task_id)
@@ -248,14 +282,13 @@ class TaskExecutor:
             running.cancel()
         else:
             snapshot.status = TaskStatus.CANCELLED
-            await self._store.save(snapshot)
-            await self._event_bus.publish("task.cancelled", snapshot.to_dict())
+            await self._persist_terminal(snapshot)
         logger.info(f"[TaskExecutor] 任务已取消: {task_id}")
         return True
 
-    async def get_status(self, task_id: str) -> dict | None:
+    async def get_status(self, task_id: str, *, user_id: str = "") -> dict | None:
         snapshot = await self._store.get(task_id)
-        if not snapshot:
+        if not snapshot or not self._is_owned_by(snapshot, user_id):
             return None
         status = snapshot.status.value if isinstance(snapshot.status, TaskStatus) else str(snapshot.status)
         return {
@@ -274,7 +307,7 @@ class TaskExecutor:
             "updatedAt": snapshot.updated_at,
         }
 
-    async def list_tasks(self) -> list[dict]:
+    async def list_tasks(self, *, user_id: str = "") -> list[dict]:
         return [
             {
                 "taskId": t.task_id,
@@ -284,9 +317,15 @@ class TaskExecutor:
                 "createdAt": t.created_at,
             }
             for t in await self._store.list_tasks()
+            if self._is_owned_by(t, user_id)
         ]
 
-    async def list_tasks_by_session(self, session_id: str) -> list[dict]:
+    async def list_tasks_by_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str = "",
+    ) -> list[dict]:
         """返回某会话的所有任务状态（供 /chat 注入已完成任务结果）。"""
         return [
             {
@@ -300,7 +339,12 @@ class TaskExecutor:
                 "updatedAt": t.updated_at,
             }
             for t in await self._store.list_by_session(session_id)
+            if self._is_owned_by(t, user_id)
         ]
+
+    @staticmethod
+    def _is_owned_by(snapshot: TaskSnapshot, user_id: str) -> bool:
+        return not user_id or snapshot.user_id == user_id
 
     # ── 优雅关闭 ──────────────────────────────────
 
@@ -325,7 +369,7 @@ class TaskExecutor:
                 if snapshot and not snapshot.is_terminal:
                     logger.warning(f"[TaskExecutor] 任务 {task_id} 超时，保存快照后取消")
                     snapshot.recovery_hint = f"服务器关闭时保存 — 原状态: {snapshot.status.value if isinstance(snapshot.status, TaskStatus) else snapshot.status}"
-                    await self._store.save(snapshot)
+                    await self._save_snapshot(snapshot)
                 bg_task.cancel()
                 try:
                     await bg_task
@@ -352,7 +396,7 @@ class TaskExecutor:
         for snapshot in executing:
             snapshot.status = TaskStatus.CANCELLED
             snapshot.error = "服务重启，任务丢失（未实现完整快照恢复）"
-            await self._store.save(snapshot)
+            await self._save_snapshot(snapshot)
             logger.warning(f"[TaskExecutor] 标记丢失任务: {snapshot.task_id}")
             recovered += 1
 
@@ -384,7 +428,7 @@ class TaskExecutor:
             "_synthetic": True,
         }
         snapshot.recovery_hint = f"连续 {error.rounds} 轮未处理审批标记，已自动挂起"
-        await self._store.save(snapshot)
+        await self._save_snapshot(snapshot)
         await self._write_journal(snapshot.task_id, "approval_requested", snapshot.recovery_hint)
         await self._event_bus.publish("task.interrupted", snapshot.to_dict())
         logger.warning(f"[TaskExecutor] 审批兜底中断: {snapshot.task_id}")
@@ -392,8 +436,58 @@ class TaskExecutor:
     # ── Journal ──────────────────────────────────
 
     async def _write_journal(self, task_id: str, event: str, description: str, detail: dict | None = None):
-        """写入一条执行日志（当前为 logger 记录，可升级为 PG Store）。"""
-        logger.info(f"[Journal] {task_id} | {event}: {description[:200]}")
+        try:
+            entry = await self._store.append_journal(
+                task_id,
+                event,
+                description,
+                detail,
+            )
+            logger.info(
+                f"[Journal] {task_id} | step={entry.step} | {event}: {description[:200]}"
+            )
+        except Exception as exc:
+            from app.harness.dead_letter import dead_letter_queue
+
+            await dead_letter_queue.enqueue(
+                "task_journal_append",
+                {
+                    "task_id": task_id,
+                    "event": event,
+                    "description": description,
+                    "detail": detail or {},
+                },
+                error=str(exc),
+            )
+            logger.exception(f"[Journal] 写入失败，已进入死信: {task_id}")
+
+    async def _save_snapshot(self, snapshot: TaskSnapshot) -> None:
+        try:
+            await self._store.save(snapshot)
+        except Exception as exc:
+            from app.harness.dead_letter import dead_letter_queue
+
+            await dead_letter_queue.enqueue(
+                "task_snapshot_save",
+                {"snapshot": snapshot.to_dict()},
+                error=str(exc),
+            )
+            logger.exception(
+                f"[TaskExecutor] 快照写入失败，已进入死信: {snapshot.task_id}"
+            )
+
+    async def read_journal(
+        self,
+        task_id: str,
+        *,
+        user_id: str = "",
+    ) -> list[dict]:
+        snapshot = await self._store.get(task_id)
+        if user_id and (
+            snapshot is None or not self._is_owned_by(snapshot, user_id)
+        ):
+            return []
+        return [entry.to_dict() for entry in await self._store.read_journal(task_id)]
 
     @staticmethod
     def _event_payload(event: dict) -> dict:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import uuid
@@ -16,19 +17,20 @@ from app.common.response import error, ok
 from app.common.streaming import extract_text_content, make_event, make_sse
 from app.config.settings import get_settings
 from app.gateway.model_gateway import model_gateway
-from app.harness.task_context import TaskStatus
+from app.gateway.status_events import drain_gateway_status, gateway_status_queue
+from app.harness.task_context import ChatContext, TaskStatus, task_context_manager
 from app.harness.task_executor import task_executor
 from app.prompt.triage_prompt import parse_capability_prefix
 from app.memory.semantic_memory import semantic_memory
 from app.evaluation.online_eval import EvalRecord, online_eval
 from app.auth import get_current_user_id
 from app.service.session_service import store
-from app.tool.task_tools import current_session_id
 from app.storage.db import new_session
 from app.storage.models.ai_ppt_inst import PptInstRepo
 from app.tool.bash_tool import resolve_confirmation
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+chat_router = APIRouter(tags=["agent"])
 
 
 class ChatRequest(BaseModel):
@@ -87,7 +89,8 @@ def _check_query_length(query: str):
 # 统一对话入口 — 使用启动时创建的单例 Agent
 # ═══════════════════════════════════════════
 
-@router.post("/chat")
+@chat_router.post("/chat")
+@router.post("/chat", deprecated=True)
 async def agent_chat(req: ChatRequest, request: Request):
     query = req.get_message()
     conversation_id = req.get_conversation_id()
@@ -102,7 +105,7 @@ async def agent_chat(req: ChatRequest, request: Request):
 
     if conversation_id:
         owner = store.get_session_owner(conversation_id)
-        if owner and owner != user_id:
+        if owner is not None and owner != user_id:
             return error(403, "无权访问该会话")
         try:
             store.touch_last_active(conversation_id)
@@ -117,13 +120,10 @@ async def agent_chat(req: ChatRequest, request: Request):
         clean_query = f"{clean_query}\n\n用户上传的文件:\n{file_ctx}"
 
     async def event_generator():
-        # 设置会话上下文，供 create_background_task 关联真实会话
-        current_session_id.set(thread_id)
-
         # ── 语义长期记忆注入（从 TriageAgent 封装下沉）──────────
         memory_context = ""
         try:
-            memories = await semantic_memory.search("default", clean_query)
+            memories = await semantic_memory.search(user_id, clean_query)
             memory_context = semantic_memory.build_context_injection(memories)
         except Exception:
             pass
@@ -131,7 +131,10 @@ async def agent_chat(req: ChatRequest, request: Request):
         # ── 注入已完成的后台任务结果 ──────────────────────
         final_query = clean_query
         try:
-            done_tasks = await task_executor.list_tasks_by_session(thread_id)
+            done_tasks = await task_executor.list_tasks_by_session(
+                thread_id,
+                user_id=user_id,
+            )
             completed = [t for t in done_tasks
                          if t.get("status") == "completed" and t.get("result")]
             if completed:
@@ -147,24 +150,28 @@ async def agent_chat(req: ChatRequest, request: Request):
         if memory_context:
             messages.insert(0, {"role": "system", "content": memory_context})
 
+        chat_context = ChatContext(user_id=user_id, session_id=thread_id)
+        parent_context = task_context_manager.get()
+        task_context_manager.set(chat_context)
         config = {
             "recursion_limit": 100,
-            "configurable": {
-                "thread_id": thread_id,
-                "user_id": user_id,
-                "session_id": thread_id,
-            }
+            "configurable": chat_context.configurable(),
         }
 
         full_answer = ""
         tools_used: set[str] = set()
         start_time = __import__("time").monotonic()
+        status_queue: asyncio.Queue[dict] = asyncio.Queue()
+        parent_status_queue = gateway_status_queue.get()
+        gateway_status_queue.set(status_queue)
         try:
             async for chunk in agent.astream_events(
                 {"messages": messages},
                 version="v2",
                 config=config,
             ):
+                for status_event in drain_gateway_status(status_queue):
+                    yield make_event("status", **status_event)
                 kind = chunk.get("event", "")
 
                 if kind == "on_tool_start":
@@ -193,9 +200,12 @@ async def agent_chat(req: ChatRequest, request: Request):
                         full_answer += content
                         yield make_event("text", content=content)
 
+            for status_event in drain_gateway_status(status_queue):
+                yield make_event("status", **status_event)
+
             # ── 保存会话（含工具列表）──────────────
             try:
-                _save_session(thread_id, clean_query, full_answer, req.userId,
+                _save_session(thread_id, clean_query, full_answer, user_id,
                               tools=",".join(sorted(tools_used)))
             except Exception:
                 pass
@@ -205,7 +215,7 @@ async def agent_chat(req: ChatRequest, request: Request):
                 try:
                     import asyncio as _asyncio
                     _asyncio.create_task(
-                        semantic_memory.add("default", clean_query, full_answer)
+                        semantic_memory.add(user_id, clean_query, full_answer)
                     )
                 except Exception:
                     pass
@@ -234,9 +244,10 @@ async def agent_chat(req: ChatRequest, request: Request):
 
             yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
             yield make_sse("[DONE]")
-
         except Exception as e:
             logger.error(f"Agent 异常: {e}", exc_info=True)
+            for status_event in drain_gateway_status(status_queue):
+                yield make_event("status", **status_event)
             # 失败也记录评估
             try:
                 total_time = int((__import__("time").monotonic() - start_time) * 1000)
@@ -253,6 +264,9 @@ async def agent_chat(req: ChatRequest, request: Request):
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
             yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))
             yield make_sse("[DONE]")
+        finally:
+            task_context_manager.set(parent_context)
+            gateway_status_queue.set(parent_status_queue)
 
     return EventSourceResponse(
         event_generator(),
@@ -265,10 +279,13 @@ async def agent_chat(req: ChatRequest, request: Request):
 # ═══════════════════════════════════════════
 
 @router.post("/pptx/download")
-async def agent_pptx_download(req: StopRequest):
+async def agent_pptx_download(req: StopRequest, request: Request):
     from minio import Minio
     from minio.error import S3Error
 
+
+    if store.get_session_owner(req.conversationId) != get_current_user_id(request):
+        return error(403, "无权访问该会话")
 
     repo = PptInstRepo()
     inst = repo.find_by_session_id(req.conversationId)
@@ -304,34 +321,46 @@ async def agent_pptx_download(req: StopRequest):
 
 
 @router.post("/stop")
-async def agent_stop(req: StopRequest):
+async def agent_stop(req: StopRequest, request: Request):
+    if store.get_session_owner(req.conversationId) != get_current_user_id(request):
+        return error(403, "无权访问该会话")
     await __import__("app.common.redis", fromlist=["publish_stop"]).publish_stop(req.conversationId)
     return ok(None, message="已发送停止信号")
 
 
 @router.post("/shell/confirm")
-async def shell_confirm(req: ShellConfirmRequest):
-    ok_result = resolve_confirmation(req.confirmId, req.approved)
+async def shell_confirm(req: ShellConfirmRequest, request: Request):
+    ok_result = resolve_confirmation(
+        req.confirmId,
+        req.approved,
+        get_current_user_id(request),
+    )
     if not ok_result:
         return error(404, "确认请求不存在或已过期")
     return ok(None, message="已确认" if req.approved else "已拒绝")
 
 
 @router.post("/task/status")
-async def task_status(req: TaskQueryRequest):
+async def task_status(req: TaskQueryRequest, request: Request):
 
-    result = await task_executor.get_status(req.taskId)
+    result = await task_executor.get_status(
+        req.taskId,
+        user_id=get_current_user_id(request),
+    )
     if not result:
         return error(404, "任务不存在")
     return ok(result)
 
 
 @router.post("/task/stream")
-async def task_stream(req: TaskQueryRequest):
+async def task_stream(req: TaskQueryRequest, request: Request):
 
 
 
-    snapshot = await task_executor.get_status(req.taskId)
+    snapshot = await task_executor.get_status(
+        req.taskId,
+        user_id=get_current_user_id(request),
+    )
     if not snapshot:
         async def _err():
             yield make_sse(json.dumps({"type": "error", "content": "任务不存在"}, ensure_ascii=False))
@@ -366,18 +395,23 @@ async def task_stream(req: TaskQueryRequest):
 
 
 @router.post("/task/cancel")
-async def task_cancel(req: TaskQueryRequest):
+async def task_cancel(req: TaskQueryRequest, request: Request):
 
-    if await task_executor.cancel(req.taskId):
+    if await task_executor.cancel(
+        req.taskId,
+        user_id=get_current_user_id(request),
+    ):
         return ok(None, message="已发送取消信号")
     return error(404, "任务不存在")
 
 
 @router.post("/task/resume")
-async def task_resume(req: TaskResumeRequest):
+async def task_resume(req: TaskResumeRequest, request: Request):
     """恢复挂起的后台任务（HITL 审批完成后调用）。"""
     ok_resumed = await task_executor.resume(
-        req.taskId, {"action": req.action, "comment": req.comment}
+        req.taskId,
+        {"action": req.action, "comment": req.comment},
+        user_id=get_current_user_id(request),
     )
     if not ok_resumed:
         return error(404, "任务不存在或非挂起状态")
@@ -385,9 +419,9 @@ async def task_resume(req: TaskResumeRequest):
 
 
 @router.post("/task/list")
-async def task_list():
+async def task_list(request: Request):
 
-    return ok(await task_executor.list_tasks())
+    return ok(await task_executor.list_tasks(user_id=get_current_user_id(request)))
 
 
 @router.post("/admin/gateway")
@@ -411,14 +445,18 @@ async def gateway_switch(req: GatewaySwitchRequest):
 # ═══════════════════════════════════════════
 
 @router.post("/feedback")
-async def submit_feedback(req: FeedbackRequest):
+async def submit_feedback(req: FeedbackRequest, request: Request):
+
+    user_id = get_current_user_id(request)
+    if store.get_session_owner(req.conversationId) != user_id:
+        return error(403, "无权访问该会话")
 
     db = new_session()
     try:
         db.execute(
             """INSERT INTO agentx_feedback (session_id, user_id, rating, comment, created_at)
                VALUES (%s, %s, %s, %s, %s)""",
-            (req.conversationId, "", req.rating, req.comment, datetime.now(timezone.utc)),
+            (req.conversationId, user_id, req.rating, req.comment, datetime.now(timezone.utc)),
         )
         db.commit()
         db.close()

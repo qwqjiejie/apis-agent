@@ -56,7 +56,13 @@ class FileService:
 
     # ---- upload ----
 
-    async def upload(self, file: UploadFile, session_id: str = "") -> dict:
+    async def upload(
+        self,
+        file: UploadFile,
+        session_id: str = "",
+        *,
+        user_id: str,
+    ) -> dict:
         original_name = file.filename or "unknown"
         file_type = get_file_type(original_name)
         if not is_supported(original_name):
@@ -74,7 +80,7 @@ class FileService:
         # SHA-256 去重检查
         file_hash = compute_file_hash(content)
         file_id = str(uuid.uuid4())
-        dup_result = self._check_duplicate(file_hash, original_name)
+        dup_result = self._check_duplicate(file_hash, original_name, user_id)
         if dup_result:
             logger.info(f"[Document] 去重跳过: {original_name} (hash={file_hash[:16]})")
             return dup_result
@@ -136,6 +142,7 @@ class FileService:
                     status=final_status.value,
                     embed=bool(embed_flag),
                     session_id=session_id or None,
+                    user_id=user_id,
                     created_at=now,
                     updated_at=now,
                 ))
@@ -154,14 +161,19 @@ class FileService:
             "extractedText": extracted_text or "",
         }
 
-    def _check_duplicate(self, file_hash: str, filename: str) -> dict | None:
+    def _check_duplicate(
+        self,
+        file_hash: str,
+        filename: str,
+        user_id: str,
+    ) -> dict | None:
         """检查重复文件。返回非 None 表示已存在，跳过上传。"""
         if not self._db_ok:
             return None
         try:
             repo = FileInfoRepo()
             # 按文件名搜索已有记录（简单实现，后续可优化为哈希索引）
-            rows, _ = repo.paginate(1, 1000)
+            rows, _ = repo.paginate(1, 1000, AiFileInfo.user_id == user_id)
             for r in rows:
                 if r.file_name == filename:
                     return {  # 同名文件当作替换处理 — 删除旧记录
@@ -206,11 +218,22 @@ class FileService:
 
     # ---- list ----
 
-    def list_files(self, page: int = 1, size: int = 20) -> tuple[list[dict], int]:
+    def list_files(
+        self,
+        page: int = 1,
+        size: int = 20,
+        *,
+        user_id: str,
+    ) -> tuple[list[dict], int]:
         if not self._db_ok:
             return [], 0
         repo = FileInfoRepo()
-        rows, total = repo.paginate(page, size, order_by=AiFileInfo.created_at.desc())
+        rows, total = repo.paginate(
+            page,
+            size,
+            AiFileInfo.user_id == user_id,
+            order_by=AiFileInfo.created_at.desc(),
+        )
         records = [
             {
                 "fileId": r.file_id, "fileName": r.file_name,
@@ -223,10 +246,13 @@ class FileService:
 
     # ---- info ----
 
-    def get_info(self, file_id: str) -> dict | None:
+    def get_info(self, file_id: str, *, user_id: str) -> dict | None:
         if not self._db_ok:
             return None
-        r = FileInfoRepo().find_by_file_id(file_id)
+        r = FileInfoRepo().find_one(
+            AiFileInfo.file_id == file_id,
+            AiFileInfo.user_id == user_id,
+        )
         if not r:
             return None
         return {
@@ -238,10 +264,13 @@ class FileService:
 
     # ---- content ----
 
-    def get_content(self, file_id: str) -> dict | None:
+    def get_content(self, file_id: str, *, user_id: str) -> dict | None:
         if not self._db_ok:
             return None
-        r = FileInfoRepo().find_by_file_id(file_id)
+        r = FileInfoRepo().find_one(
+            AiFileInfo.file_id == file_id,
+            AiFileInfo.user_id == user_id,
+        )
         if not r:
             return None
         return {
@@ -252,9 +281,12 @@ class FileService:
 
     # ---- delete ----
 
-    def delete(self, file_id: str) -> bool:
+    def delete(self, file_id: str, *, user_id: str) -> bool:
         if self._db_ok:
-            info = FileInfoRepo().find_by_file_id(file_id)
+            info = FileInfoRepo().find_one(
+                AiFileInfo.file_id == file_id,
+                AiFileInfo.user_id == user_id,
+            )
             if info:
                 if self._minio and info.minio_path:
                     try:
@@ -263,15 +295,21 @@ class FileService:
                         pass
                 if vector_store.ready:
                     vector_store.delete_by_file(file_id)
-                return FileInfoRepo().delete_by_file_id(file_id) > 0
+                return FileInfoRepo().delete_by(
+                    AiFileInfo.file_id == file_id,
+                    AiFileInfo.user_id == user_id,
+                ) > 0
         return False
 
     # ---- exists ----
 
-    def exists(self, file_id: str) -> bool:
+    def exists(self, file_id: str, *, user_id: str) -> bool:
         if not self._db_ok:
             return False
-        return FileInfoRepo().find_by_file_id(file_id) is not None
+        return FileInfoRepo().find_one(
+            AiFileInfo.file_id == file_id,
+            AiFileInfo.user_id == user_id,
+        ) is not None
 
 
 file_service = FileService()

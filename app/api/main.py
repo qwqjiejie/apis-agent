@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.middleware.rate_limit import RateLimitMiddleware
-from app.api.routes.agent import router as agent_router
+from app.api.routes.agent import chat_router, router as agent_router
 from app.api.routes.session import router as session_router
 from app.api.routes.file import router as file_router
 from app.api.routes.skill_routes import router as skill_router
@@ -144,7 +144,12 @@ async def lifespan(app: FastAPI):
 
     # ── 6. TaskExecutor（注入 executor_agent）────────
     from app.harness.task_executor import task_executor
-    from app.harness.task_context import MemoryTaskStore, PgTaskStore
+    from app.harness.task_context import (
+        MemoryTaskStore,
+        PgTaskStore,
+        TaskSnapshot,
+        task_context_manager,
+    )
     if getattr(app.state, "store", None) is not None:
         task_repository = PgTaskStore(app.state.store)
         logger.info("[main] TaskExecutor 使用 PostgreSQL 持久化仓储")
@@ -156,6 +161,28 @@ async def lifespan(app: FastAPI):
         executor_agent=app.state.executor_agent,
     )
     app.state.task_executor = task_executor
+    app.state.context_manager = task_context_manager
+
+    # 关键持久化失败通过 PG DeadLetter 重试；PG 不可用时队列自动退回内存。
+    from app.harness.dead_letter import dead_letter_queue
+    dead_letter_queue.configure(getattr(app.state, "store", None))
+
+    async def _retry_snapshot(args):
+        await task_repository.save(TaskSnapshot.from_dict(args["snapshot"]))
+
+    async def _retry_journal(args):
+        await task_repository.append_journal(
+            args["task_id"],
+            args["event"],
+            args["description"],
+            args.get("detail"),
+        )
+
+    dead_letter_queue.register_retry_handler("task_snapshot_save", _retry_snapshot)
+    dead_letter_queue.register_retry_handler("task_journal_append", _retry_journal)
+
+    from app.memory.semantic_memory import semantic_memory
+    semantic_memory.configure(getattr(app.state, "store", None))
 
     # ── 7. SkillManager ─────────────────────────────
     from app.skill.skill_manager import skill_manager
@@ -184,7 +211,6 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[main] Redis 不可用，EventBus 降级为纯内存模式: {e}")
 
     # ── 10. 死信扫描 ────────────────────────────────
-    from app.harness.dead_letter import dead_letter_queue
     await dead_letter_queue.start_scanner(120.0)
 
     # ── 11. 工具热加载 ──────────────────────────────
@@ -196,7 +222,7 @@ async def lifespan(app: FastAPI):
 
     # ── 12. SubAgent 热加载 ──────────────────────────
     from app.harness.subagent_hot_reloader import SubAgentHotReloader
-    specialists_dir = Path(__file__).resolve().parent.parent / "agent" / "specialist"
+    specialists_dir = Path(__file__).resolve().parent.parent / "subagents"
     sa_reloader = SubAgentHotReloader(specialists_dir, on_reload=lambda: _rebuild_agents(app))
     await sa_reloader.start()
     app.state.subagent_hot_reloader = sa_reloader
@@ -261,6 +287,7 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 
 
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="/api/v1")
 app.include_router(session_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1")
 app.include_router(skill_router)
