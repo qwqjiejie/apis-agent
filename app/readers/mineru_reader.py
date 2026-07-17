@@ -61,7 +61,7 @@ class MinerUReader:
             if ok:
                 logger.info(f"[MinerU] magic-pdf 可用: {result.stdout.strip()[:80]}")
             else:
-                logger.warning(f"[MinerU] magic-pdf 未安装，降级 pdfplumber")
+                logger.warning("[MinerU] magic-pdf 未安装，降级 pdfplumber")
             return ok
         except FileNotFoundError:
             logger.warning("[MinerU] magic-pdf 未找到，降级 pdfplumber。安装: pip install magic-pdf")

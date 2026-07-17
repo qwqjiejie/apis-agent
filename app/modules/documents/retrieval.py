@@ -5,8 +5,8 @@ import re
 from app.common.langfuse_client import observe
 from app.common.llm import build_llm
 from app.config.settings import get_settings
-from app.service.embedding_service import embed_query, embedding_available
-from app.storage.vector_store import vector_store
+from app.modules.documents.embedding import embed_query, embedding_available
+from app.infrastructure.milvus.vector_store import vector_store
 
 logger = logging.getLogger("apis")
 

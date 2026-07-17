@@ -15,9 +15,9 @@ logging.basicConfig(
 
 def _check_infrastructure():
     """启动时强制检查基础设施，任一不可用则退出进程。"""
-    from app.storage.db import check_db
-    from app.common.redis import check_redis
-    from app.storage.vector_store import vector_store
+    from app.infrastructure.milvus.vector_store import vector_store
+    from app.infrastructure.postgres.database import check_db
+    from app.infrastructure.redis.client import check_redis
 
     services = [
         ("PostgreSQL", check_db),

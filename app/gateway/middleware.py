@@ -20,7 +20,6 @@ from pydantic import PrivateAttr
 from app.gateway.status_events import emit_gateway_status
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
     from app.gateway.model_gateway import ModelGateway
     from app.gateway.types import ModelRole
 

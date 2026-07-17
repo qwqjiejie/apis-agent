@@ -7,8 +7,9 @@ Executor 驱动长周期后台任务，Specialist 通过声明式 `AGENT.md` 提
 当前仓库同时包含后端 API、轻量前端、任务可靠性组件、文档 RAG、Skills 管理和
 在线/离线评估工具，是一个单体部署、模块化组织的 Python 应用。
 
-当前架构差距、目标目录、实施阶段和验收标准见
-[架构优化实施计划](docs/architecture-optimization-plan.md)。优化采用模块化单体和渐进迁移策略。
+架构边界、实施记录和验收结果见
+[架构优化实施计划](docs/architecture-optimization-plan.md)，目录放置规则见
+[项目结构蓝图](docs/project-structure-blueprint.md)。
 
 ## 核心能力
 
@@ -96,13 +97,13 @@ Triage DeepAgent (container.agent)
 |---|---|---|
 | 启动与传输 | `app/main.py`、`app/bootstrap`、`app/api` | 基础设施预检、运行时依赖装配、FastAPI lifespan、中间件、路由和 SSE |
 | Agent 编排 | `app/agent`、`app/subagents`、`app/prompt` | Agent 构建、Executor 包装、领域代理和系统提示词 |
-| 可靠性 Harness | `app/harness` | 任务生命周期、快照、Journal、HITL、事件总线、DLQ 和热加载 |
+| 业务模块 | `app/modules` | chat、tasks、documents、identity、skills 的用例、模型和端口 |
+| 可靠性 Harness | `app/harness` | 工具/SubAgent 热加载和旧任务路径兼容导出 |
 | 模型网关 | `app/gateway` | 模型注册、健康状态、熔断、动态路由和状态事件 |
-| RAG 与文档 | `app/rag`、`app/document`、`app/readers` | 检索管线、文档状态、解析和图谱能力 |
-| 业务服务 | `app/service` | 会话、文件、Embedding 和 RAG 服务 |
-| 数据访问 | `app/storage`、`app/stores` | 业务表 Repository、Milvus、LangGraph PG Store 和 Neo4j |
+| 基础设施 | `app/infrastructure` | PostgreSQL、Redis、Milvus、MinIO 和 Neo4j 适配器 |
+| 文档解析 | `app/readers` | MinerU 等外部解析器适配 |
 | 记忆与上下文 | `app/memory`、`app/context` | 语义记忆、token 统计和上下文压缩工具 |
-| 扩展能力 | `app/tool`、`app/skill`、`app/skills` | Agent 工具注册和应用运行时 Skills 管理 |
+| 扩展能力 | `app/tool`、`app/subagents`、`app/skills` | Agent 工具和只读内置声明 |
 | 评估 | `app/evaluation` | 在线采集、离线 Agent/RAG 评估和数据集 |
 
 ## 核心运行流程
@@ -154,7 +155,7 @@ Query
   -> RAG context
 ```
 
-`app/rag/graph_rag.py` 和 Neo4j 管理器已经提供图谱检索基础组件，但当前默认
+`app/modules/documents/graph.py` 和 Neo4j 适配器已经提供图谱检索基础组件，但当前默认
 `rag_service` 尚未把 GraphRAG 接入主检索链路。
 
 ### 模型网关
@@ -214,7 +215,8 @@ Neo4j 连接。
 
 ### 环境要求
 
-- Python 3.11+
+- Python 3.11-3.14
+- uv 0.8+
 - PostgreSQL 16+
 - Redis
 - 可选：Milvus 2.4+、MinIO、Neo4j、Langfuse、MinerU
@@ -223,10 +225,7 @@ Neo4j 连接。
 ### 1. 安装
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
+uv sync --frozen --extra dev
 ```
 
 ### 2. 配置
@@ -238,6 +237,8 @@ cp .env.example .env
 最小生产配置示例：
 
 ```dotenv
+APP_ENV=production
+DATA_DIR=/var/lib/apis-agent
 LLM_API_KEY=sk-your-api-key-here
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4o
@@ -263,21 +264,33 @@ TAVILY_API_KEY=tvly-your-tavily-key-here
 ### 3. 初始化业务表
 
 ```bash
-psql -d apis_agent -f sql/apis_agent_pg.sql
+uv run alembic upgrade head
 ```
 
-LangGraph checkpointer/store 表由 `AsyncPostgresSaver.setup()` 和
-`AsyncPostgresStore.setup()` 在启动时创建。
+已有 `sql/apis_agent_pg.sql` 数据库完成结构核对后，执行
+`uv run alembic stamp 0001` 纳入迁移版本，再执行 `uv run alembic upgrade head`。
+LangGraph 表仍由框架 setup 创建。
 
 ### 4. 启动
 
 ```bash
-python app/main.py
+uv run python -m app.main
 ```
 
 - 前端：<http://localhost:8080/>
 - OpenAPI：<http://localhost:8080/docs>
 - OpenAPI JSON：<http://localhost:8080/openapi.json>
+- Liveness：<http://localhost:8080/health/live>
+- Readiness：<http://localhost:8080/health/ready>
+
+完整本地基础设施可直接启动：
+
+```bash
+docker compose up --build
+```
+
+生产覆盖示例位于 `deploy/compose.production.yaml`，敏感配置模板位于
+`deploy/.env.production.example`。
 
 ## API
 
@@ -343,17 +356,21 @@ python app/main.py
 | PUT | `/api/v1/skills/{name}/toggle` | 启用或禁用 Skill |
 | DELETE | `/api/v1/skills/{name}` | 删除数据库记录和 Skill 目录 |
 
-这里的 `app/skills` 是应用运行时提供给 Agent 的业务 Skills，不是 Codex 用户级
-`~/.agents/skills`。
+`app/skills` 只保存版本控制内的只读内置 Skills；上传内容写入
+`DATA_DIR/MANAGED_SKILLS_DIR`。它们都不是 Codex 用户级 `~/.agents/skills`。
 
 ## 项目结构
 
 ```text
 apis-agent/
 |-- pyproject.toml                  # 项目元数据、运行和开发依赖
+|-- uv.lock                         # 跨环境依赖锁定
 |-- .env.example                   # 环境变量模板
-|-- sql/
-|   `-- apis_agent_pg.sql          # PostgreSQL 业务表 DDL
+|-- Dockerfile                     # 只读生产镜像
+|-- compose.yaml                   # 完整本地基础设施
+|-- migrations/                    # Alembic schema 版本
+|-- deploy/                        # 入口脚本和生产覆盖示例
+|-- docs/adr/                      # 架构决策记录
 |-- app/
 |   |-- main.py                    # 正式启动入口和基础设施预检
 |   |-- api/
@@ -377,18 +394,24 @@ apis-agent/
 |   |-- subagents/                 # 6 个声明式 Specialist AGENT.md
 |   |-- bootstrap/                 # ApplicationContainer 和应用依赖装配
 |   |-- modules/
-|   |   `-- documents/             # 上传、解析、分块、状态、进度和增强检索
+|   |   |-- chat/                  # 会话、标题、反馈和持久化端口
+|   |   |-- documents/             # 上传、解析、索引、检索和 GraphRAG
+|   |   |-- identity/              # JWT、用户和匿名数据迁移
+|   |   |-- skills/                # 内置/托管 Skill 生命周期
+|   |   `-- tasks/                 # 任务上下文、执行、事件和失败重试
+|   |-- infrastructure/
+|   |   |-- postgres/              # 业务 ORM、事务和 LangGraph Store
+|   |   |-- redis/                 # 锁、停止信号和 Pub/Sub
+|   |   |-- milvus/                # file_chunks 向量存储
+|   |   |-- minio/                 # 对象存储客户端
+|   |   `-- neo4j/                 # 可选图存储
 |   |-- prompt/                    # Triage/Executor system prompts
 |   |-- tool/
 |   |   |-- registry.py            # TOOL_REGISTRY 和冲突检测
 |   |   |-- task_tools.py          # 后台任务创建和查询
 |   |   |-- approval_tools.py      # HITL 审批和 Journal 工具
 |   |   `-- ...                    # 搜索、文件、Shell、grep、tool_search
-|   |-- harness/
-|   |   |-- task_executor.py       # 任务状态机和生命周期
-|   |   |-- task_context.py        # ChatContext、快照、Journal、PG/内存仓储
-|   |   |-- event_bus.py           # Redis Pub/Sub 与内存事件总线
-|   |   |-- dead_letter.py         # PG 优先、内存兜底的失败操作重试
+|   |-- harness/                   # 热加载能力和旧任务路径兼容导出
 |   |   |-- tool_hot_reloader.py   # 工具热加载
 |   |   `-- subagent_hot_reloader.py
 |   |-- gateway/
@@ -397,29 +420,27 @@ apis-agent/
 |   |   |-- circuit_breaker.py     # 三态熔断器
 |   |   |-- health_probe.py        # 周期探活
 |   |   `-- status_events.py       # SSE 降级状态桥接
-|   |-- service/                   # 会话、聊天、反馈、Embedding 及兼容服务入口
-|   |-- storage/
-|   |   |-- db.py                  # SQLAlchemy PostgreSQL 业务连接
-|   |   |-- base.py                # 通用 Repository
-|   |   |-- vector_store.py        # Milvus file_chunks
-|   |   `-- models/                # session/file/ppt ORM 模型
-|   |-- stores/
-|   |   |-- pg_store.py            # LangGraph PG checkpointer/store
-|   |   `-- neo4j_manager.py       # 可选 Neo4j 连接
-|   |-- rag/                       # GraphRAG 和旧检索路径兼容层
-|   |-- document/                  # 旧文档路径兼容层
+|   |-- service/                   # 旧业务路径兼容导出
+|   |-- storage/                   # 旧基础设施路径兼容导出
+|   |-- stores/                    # 旧 Store 路径兼容导出
+|   |-- rag/                       # 旧 RAG 路径兼容导出
+|   |-- document/                  # 旧文档路径兼容导出
 |   |-- readers/                   # MinerU 等文档解析器
 |   |-- memory/                    # 跨会话语义记忆
 |   |-- context/                   # token 统计和上下文压缩工具
-|   |-- skill/                     # SkillManager
-|   |-- skills/                    # 应用运行时 SKILL.md
+|   |-- skill/                     # 旧 SkillManager 路径兼容导出
+|   |-- skills/                    # 只读内置 SKILL.md
 |   |-- evaluation/                # 在线/离线 Agent 和 RAG 评估
 |   |-- common/                    # LLM、Redis、日志、异常、SSE、Langfuse
 |   |-- config/settings.py         # Pydantic Settings
 |   |-- auth.py                    # 匿名身份和 JWT
 |   |-- utils/                     # 图片识别、通用工具及旧文档工具兼容层
 |   `-- static/                    # 由 FastAPI 托管的前端静态资源
-`-- tests/                         # 103 项单元/API/可靠性测试
+`-- tests/
+    |-- unit/                      # 无外部系统
+    |-- contract/                  # API、SSE 和兼容契约
+    |-- integration/               # PostgreSQL 等真实基础设施
+    `-- e2e/                       # 部署级冒烟测试
 ```
 
 ## 扩展开发
@@ -466,18 +487,29 @@ async def my_search(query: str) -> str:
 
 ### 新增运行时 Skill
 
-在 `app/skills/<name>/SKILL.md` 创建带 `name` 和 `description` 的 frontmatter。
-SkillManager 支持把文件系统定义同步到 `agentx_skill`，上传 zip 后也会立即触发同步。
-当前实现没有独立的周期同步任务。
+内置 Skill 在 `app/skills/<name>/SKILL.md` 创建带 `name` 和 `description` 的
+frontmatter；它随镜像发布并保持只读。用户上传的 zip 写入
+`DATA_DIR/MANAGED_SKILLS_DIR`，SkillManager 将两类定义同步到 `agentx_skill`。
 
 ### 测试
 
 ```bash
-pytest -q
+uv run pytest -m unit
+uv run pytest -m contract
+uv run pytest -m integration       # 需要先执行 Alembic 并启动 PostgreSQL
 ```
 
-当前测试集共收集 95 项，覆盖聊天主链路、用户隔离、Repository、文件解析、模型
-降级、语义记忆、Journal、DeadLetter、任务持久化、HITL 恢复、上下文工具等行为。
+当前测试集共收集 115 项：无外部依赖的 unit + contract 共 106 项，PostgreSQL
+integration 共 9 项。最终本地回归为 115 项全部通过；CI 会创建独立 PostgreSQL、
+执行 Alembic 后分别运行两组测试。
+
+质量与迁移检查：
+
+```bash
+uv run ruff check app tests migrations
+uv run mypy app/config app/bootstrap app/infrastructure/reliability.py app/modules/identity
+uv run alembic upgrade head --sql
+```
 
 离线评估入口：
 
@@ -492,7 +524,7 @@ python -m app.evaluation.offline_eval_rag
 - 上下文压缩工具已存在，但尚未注入当前 DeepAgent 中间件链。
 - 任务重启只支持恢复 `waiting_human`；运行中的任务会标记取消。
 - Milvus 当前使用共享 `file_chunks` Collection，并按文件 ID 做逻辑过滤，不是物理多租户隔离。
-- 业务 Repository 使用同步 SQLAlchemy；耗时向量化已通过线程池避免阻塞，但业务数据库访问仍是同步调用。
+- 业务 Repository 使用用例级同步 SQLAlchemy 事务，异步 API 统一在线程池调用；LangGraph 使用独立异步连接池。
 - Skills 管理和网关管理接口尚无独立管理员鉴权。
 - 当前密码哈希是轻量 SHA-256 方案，生产部署应迁移到 Argon2id 等密码哈希算法。
 

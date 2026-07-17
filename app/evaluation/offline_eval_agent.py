@@ -184,7 +184,10 @@ async def main():
             avg = sum(scores_vals) / len(scores_vals)
             logger.info(f"  {name}: avg={avg:.3f} (n={len(scores_vals)})")
 
-    output_path = Path(__file__).resolve().parent / "agent_eval_results.json"
+    from app.config.settings import get_settings
+    output_dir = get_settings().evaluation_results_path
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "agent_eval_results.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
 

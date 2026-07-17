@@ -1,6 +1,5 @@
 from app.common.logger import logger
 from app.config.settings import get_settings
-from app.context.token_counter import estimate_messages_tokens
 
 
 def compress_layer_1(messages: list) -> list:

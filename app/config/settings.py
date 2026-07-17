@@ -15,6 +15,10 @@ def _get_env_file() -> Path:
 
 
 class Settings(BaseSettings):
+    # 运行环境与数据目录
+    app_env: str = "development"
+    data_dir: str = "~/.local/share/apis-agent"
+
     # LLM 配置
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
@@ -44,6 +48,8 @@ class Settings(BaseSettings):
     pg_user: str = "postgres"
     pg_password: str = ""
     pg_db: str = "apis_agent"
+    pg_pool_size: int = 10
+    pg_max_overflow: int = 20
 
     # PostgreSQL — LangGraph 专用连接（checkpointer + store）
     # 留空则自动从 pg_* 拼接
@@ -56,6 +62,9 @@ class Settings(BaseSettings):
     minio_secret_key: str = ""
     minio_bucket: str = "apis"
     upload_dir: str = "uploads"
+    managed_skills_dir: str = "skills"
+    artifacts_dir: str = "artifacts"
+    evaluation_results_dir: str = "evaluations"
     max_upload_size_mb: int = 20
 
     # Milvus 配置
@@ -82,6 +91,11 @@ class Settings(BaseSettings):
 
     # 任务控制配置
     task_lock_timeout_seconds: int = 300
+
+    # 外部基础设施可靠性
+    external_connect_timeout_seconds: float = 5.0
+    external_operation_timeout_seconds: float = 30.0
+    external_retry_attempts: int = 3
 
     # 深度研究配置
     deep_research_max_concurrency: int = 3
@@ -112,6 +126,33 @@ class Settings(BaseSettings):
 
     model_config = {"env_file": str(_get_env_file()), "env_file_encoding": "utf-8", "extra": "ignore"}
 
+    def resolve_data_path(self, child: str) -> Path:
+        root = Path(self.data_dir).expanduser()
+        if not root.is_absolute():
+            root = Path(__file__).resolve().parents[2] / root
+        path = Path(child).expanduser()
+        return path if path.is_absolute() else root / path
+
+    @property
+    def upload_path(self) -> Path:
+        return self.resolve_data_path(self.upload_dir)
+
+    @property
+    def managed_skills_path(self) -> Path:
+        return self.resolve_data_path(self.managed_skills_dir)
+
+    @property
+    def artifacts_path(self) -> Path:
+        return self.resolve_data_path(self.artifacts_dir)
+
+    @property
+    def evaluation_results_path(self) -> Path:
+        return self.resolve_data_path(self.evaluation_results_dir)
+
+    @property
+    def bundled_skills_path(self) -> Path:
+        return Path(__file__).resolve().parents[1] / "skills"
+
     @model_validator(mode="after")
     def validate_critical_config(self) -> "Settings":
         if not self.llm_api_key:
@@ -119,6 +160,19 @@ class Settings(BaseSettings):
         parsed = urlparse(self.llm_base_url)
         if not parsed.scheme or not parsed.netloc:
             raise ValueError(f"llm_base_url 格式无效: {self.llm_base_url}")
+        if self.app_env.lower() == "production":
+            missing = [
+                name
+                for name, value in (
+                    ("jwt_secret", self.jwt_secret),
+                    ("pg_password", self.pg_password),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "生产环境缺少必填配置: " + ", ".join(missing)
+                )
         return self
 
 

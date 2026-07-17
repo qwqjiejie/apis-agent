@@ -2,11 +2,12 @@ import secrets
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import inspect_session_access
-from app.service.session_service import store
+from app.modules.chat.sessions import store
 from app.common.response import ok, ok_paged, error
-from app.auth import get_current_user_id
+from app.modules.identity.auth import get_current_user_id
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -37,28 +38,33 @@ async def create_session():
 @router.post("/list")
 async def list_sessions(req: SessionListRequest, request: Request):
     user_id = get_current_user_id(request)
-    records, total = store.list_sessions(page=req.pageNum, size=req.pageSize, user_id=user_id)
+    records, total = await run_in_threadpool(
+        store.list_sessions,
+        page=req.pageNum,
+        size=req.pageSize,
+        user_id=user_id,
+    )
     return ok_paged(records, total, req.pageNum, req.pageSize)
 
 
 @router.post("/detail")
 async def get_session(req: SessionDetailRequest, request: Request):
-    session = store.get_session(req.conversationId)
+    session = await run_in_threadpool(store.get_session, req.conversationId)
     if not session:
         return error(404, "会话不存在")
-    if not inspect_session_access(request, req.conversationId).allowed:
+    if not (await inspect_session_access(request, req.conversationId)).allowed:
         return error(403, "无权访问该会话")
     return ok(session)
 
 
 @router.post("/delete")
 async def delete_session(req: SessionDeleteRequest, request: Request):
-    access = inspect_session_access(request, req.conversationId)
+    access = await inspect_session_access(request, req.conversationId)
     if not access.exists:
         return error(404, "会话不存在")
     if not access.allowed:
         return error(403, "无权访问该会话")
-    ok_deleted = store.delete_session(req.conversationId)
+    ok_deleted = await run_in_threadpool(store.delete_session, req.conversationId)
     if not ok_deleted:
         return error(404, "会话不存在")
     return ok(None)

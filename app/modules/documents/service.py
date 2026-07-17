@@ -1,23 +1,22 @@
 import asyncio
 import io
-import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import UploadFile
 from minio import Minio
 from minio.error import S3Error
 
-from app.service.embedding_service import embed_texts, embedding_available
+from app.modules.documents.embedding import embed_texts, embedding_available
 from app.config.settings import get_settings
 from app.common.exceptions import FileTooLargeError, UnsupportedFileTypeError, InvalidMimeTypeError
 from app.common.logger import logger
 from app.modules.documents.events import event_bus
 from app.modules.documents.status import DocumentStatus, compute_file_hash
-from app.storage.models.ai_file_info import AiFileInfo, FileInfoRepo
-from app.storage.vector_store import vector_store
+from app.infrastructure.milvus.vector_store import vector_store
+from app.infrastructure.minio.client import create_minio_client, ensure_bucket
+from app.infrastructure.postgres.models.file import AiFileInfo, FileInfoRepo
 from app.modules.documents.chunking import split_text
 from app.modules.documents.parsing import (
     get_file_type,
@@ -25,9 +24,6 @@ from app.modules.documents.parsing import (
     parse_file,
     validate_mime_type,
 )
-
-logger = logging.getLogger("apis")
-
 
 class FileService:
 
@@ -42,7 +38,7 @@ class FileService:
         self._minio = minio_client
         self._minio_initialized = minio_client is not None
         self._vector_store = vector_store_instance or vector_store
-        self._upload_dir = Path(get_settings().upload_dir)
+        self._upload_dir = get_settings().upload_path
 
     def configure(self, *, minio_client: Minio | None, db_available: bool = True):
         """由应用生命周期注入已初始化的基础设施。"""
@@ -60,12 +56,7 @@ class FileService:
         if not get_settings().minio_host:
             return None
         try:
-            return Minio(
-                f"{get_settings().minio_host}:{get_settings().minio_port}",
-                access_key=get_settings().minio_access_key,
-                secret_key=get_settings().minio_secret_key,
-                secure=False,
-            )
+            return create_minio_client()
         except Exception:
             return None
 
@@ -74,8 +65,7 @@ class FileService:
         if not minio:
             return
         try:
-            if not minio.bucket_exists(get_settings().minio_bucket):
-                minio.make_bucket(get_settings().minio_bucket)
+            ensure_bucket(minio)
         except S3Error:
             pass
 
@@ -97,7 +87,7 @@ class FileService:
         if not mime_valid:
             raise InvalidMimeTypeError(expected_mime, file.content_type or "")
 
-        content = file.file.read()
+        content = await file.read()
         file_size = len(content)
         if file_size > get_settings().max_upload_size_mb * 1024 * 1024:
             raise FileTooLargeError(get_settings().max_upload_size_mb)
@@ -105,7 +95,12 @@ class FileService:
         # SHA-256 去重检查
         file_hash = compute_file_hash(content)
         file_id = str(uuid.uuid4())
-        dup_result = self._check_duplicate(file_hash, original_name, user_id)
+        dup_result = await asyncio.to_thread(
+            self._check_duplicate,
+            file_hash,
+            original_name,
+            user_id,
+        )
         if dup_result:
             logger.info(f"[Document] 去重跳过: {original_name} (hash={file_hash[:16]})")
             return dup_result
@@ -156,22 +151,20 @@ class FileService:
 
         if self._db_ok:
             try:
-                now = datetime.now(timezone.utc)
-                FileInfoRepo().save(AiFileInfo(
+                await asyncio.to_thread(
+                    self._save_record,
                     file_id=file_id,
                     file_name=original_name,
                     file_type=file_type,
                     file_size=file_size,
                     file_hash=file_hash,
-                    minio_path=minio_path or None,
+                    minio_path=minio_path,
                     extracted_text=extracted_text,
-                    status=final_status.value,
-                    embed=bool(embed_flag),
-                    session_id=session_id or None,
+                    status=final_status,
+                    embed_flag=embed_flag,
+                    session_id=session_id,
                     user_id=user_id,
-                    created_at=now,
-                    updated_at=now,
-                ))
+                )
             except Exception as e:
                 logger.error(f"保存文件记录失败: {e}")
 
@@ -187,6 +180,39 @@ class FileService:
             "extractedText": extracted_text or "",
         }
 
+    def _save_record(
+        self,
+        *,
+        file_id: str,
+        file_name: str,
+        file_type: str,
+        file_size: int,
+        file_hash: str,
+        minio_path: str,
+        extracted_text: str | None,
+        status: DocumentStatus,
+        embed_flag: int,
+        session_id: str,
+        user_id: str,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        with FileInfoRepo() as repo:
+            repo.save(AiFileInfo(
+                file_id=file_id,
+                file_name=file_name,
+                file_type=file_type,
+                file_size=file_size,
+                file_hash=file_hash,
+                minio_path=minio_path or None,
+                extracted_text=extracted_text,
+                status=status.value,
+                embed=bool(embed_flag),
+                session_id=session_id or None,
+                user_id=user_id,
+                created_at=now,
+                updated_at=now,
+            ))
+
     def _check_duplicate(
         self,
         file_hash: str,
@@ -197,9 +223,8 @@ class FileService:
         if not self._db_ok:
             return None
         try:
-            repo = FileInfoRepo()
-            # 按文件名搜索已有记录（简单实现，后续可优化为哈希索引）
-            rows, _ = repo.paginate(1, 1000, AiFileInfo.user_id == user_id)
+            with FileInfoRepo() as repo:
+                rows, _ = repo.paginate(1, 1000, AiFileInfo.user_id == user_id)
             for r in rows:
                 if r.file_name == filename:
                     return {  # 同名文件当作替换处理 — 删除旧记录
@@ -253,13 +278,13 @@ class FileService:
     ) -> tuple[list[dict], int]:
         if not self._db_ok:
             return [], 0
-        repo = FileInfoRepo()
-        rows, total = repo.paginate(
-            page,
-            size,
-            AiFileInfo.user_id == user_id,
-            order_by=AiFileInfo.created_at.desc(),
-        )
+        with FileInfoRepo() as repo:
+            rows, total = repo.paginate(
+                page,
+                size,
+                AiFileInfo.user_id == user_id,
+                order_by=AiFileInfo.created_at.desc(),
+            )
         records = [
             {
                 "fileId": r.file_id, "fileName": r.file_name,
@@ -275,10 +300,11 @@ class FileService:
     def get_info(self, file_id: str, *, user_id: str) -> dict | None:
         if not self._db_ok:
             return None
-        r = FileInfoRepo().find_one(
-            AiFileInfo.file_id == file_id,
-            AiFileInfo.user_id == user_id,
-        )
+        with FileInfoRepo() as repo:
+            r = repo.find_one(
+                AiFileInfo.file_id == file_id,
+                AiFileInfo.user_id == user_id,
+            )
         if not r:
             return None
         return {
@@ -293,10 +319,11 @@ class FileService:
     def get_content(self, file_id: str, *, user_id: str) -> dict | None:
         if not self._db_ok:
             return None
-        r = FileInfoRepo().find_one(
-            AiFileInfo.file_id == file_id,
-            AiFileInfo.user_id == user_id,
-        )
+        with FileInfoRepo() as repo:
+            r = repo.find_one(
+                AiFileInfo.file_id == file_id,
+                AiFileInfo.user_id == user_id,
+            )
         if not r:
             return None
         return {
@@ -309,23 +336,27 @@ class FileService:
 
     def delete(self, file_id: str, *, user_id: str) -> bool:
         if self._db_ok:
-            info = FileInfoRepo().find_one(
-                AiFileInfo.file_id == file_id,
-                AiFileInfo.user_id == user_id,
-            )
-            if info:
-                minio = self._get_minio()
-                if minio and info.minio_path:
-                    try:
-                        minio.remove_object(get_settings().minio_bucket, info.minio_path)
-                    except S3Error:
-                        pass
-                if self._vector_store.ready:
-                    self._vector_store.delete_by_file(file_id)
-                return FileInfoRepo().delete_by(
+            with FileInfoRepo() as repo:
+                info = repo.find_one(
                     AiFileInfo.file_id == file_id,
                     AiFileInfo.user_id == user_id,
-                ) > 0
+                )
+                if info:
+                    minio = self._get_minio()
+                    if minio and info.minio_path:
+                        try:
+                            minio.remove_object(
+                                get_settings().minio_bucket,
+                                info.minio_path,
+                            )
+                        except S3Error:
+                            pass
+                    if self._vector_store.ready:
+                        self._vector_store.delete_by_file(file_id)
+                    return repo.delete_by(
+                        AiFileInfo.file_id == file_id,
+                        AiFileInfo.user_id == user_id,
+                    ) > 0
         return False
 
     # ---- exists ----
@@ -333,10 +364,11 @@ class FileService:
     def exists(self, file_id: str, *, user_id: str) -> bool:
         if not self._db_ok:
             return False
-        return FileInfoRepo().find_one(
-            AiFileInfo.file_id == file_id,
-            AiFileInfo.user_id == user_id,
-        ) is not None
+        with FileInfoRepo() as repo:
+            return repo.find_one(
+                AiFileInfo.file_id == file_id,
+                AiFileInfo.user_id == user_id,
+            ) is not None
 
 
 file_service = FileService()

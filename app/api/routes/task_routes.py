@@ -6,10 +6,10 @@ from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.routes.agent_schemas import TaskQueryRequest, TaskResumeRequest
-from app.auth import get_current_user_id
+from app.modules.identity.auth import get_current_user_id
 from app.common.response import error, ok
 from app.common.streaming import StreamEventType, make_sse
-from app.harness.task_context import TaskStatus
+from app.modules.tasks.context import TaskStatus
 
 router = APIRouter(tags=["agent-tasks"])
 

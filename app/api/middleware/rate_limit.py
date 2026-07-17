@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.common.logger import logger
-from app.common.redis import get_redis
+from app.infrastructure.redis.client import get_redis
 from app.config.settings import get_settings
 
 PREFIX = "ratelimit"

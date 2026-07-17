@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    env:
+      LLM_API_KEY: test-key
+      JWT_SECRET: ci-jwt-secret
+      PG_PASSWORD: ci-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.15"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff check app tests migrations
+      - run: >-
+          uv run mypy
+          app/config
+          app/bootstrap
+          app/infrastructure/reliability.py
+          app/modules/identity
+      - run: uv run alembic upgrade head --sql > /tmp/apis-agent-schema.sql
+      - run: uv run pytest -m "unit or contract" --cov=app --cov-report=term-missing
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: apis_agent
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d apis_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LLM_API_KEY: test-key
+      JWT_SECRET: ci-jwt-secret
+      PG_HOST: 127.0.0.1
+      PG_PASSWORD: ci-password
+      PG_DB: apis_agent
+      RATE_LIMIT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.15"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --extra dev
+      - run: uv run alembic upgrade head
+      - run: uv run pytest -m integration

@@ -21,6 +21,7 @@ class ApplicationContainer:
     minio_client: Any = None
     vector_store: Any = None
     file_service: Any = None
+    skill_manager: Any = None
     agent: Any = None
     executor_agent: Any = None
     specialist_subagents: list[Any] = field(default_factory=list)

@@ -10,15 +10,18 @@ import logging
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
-from app.auth import (
+from app.modules.identity.auth import (
     generate_token,
     get_current_user_id,
-    hash_password,
-    verify_password,
+)
+from app.modules.identity.service import (
+    InvalidCredentialsError,
+    UsernameAlreadyExistsError,
+    identity_service,
 )
 from app.common.response import error, ok
-from app.storage.db import new_session
 
 logger = logging.getLogger("apis")
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -38,89 +41,49 @@ class SyncRequest(BaseModel):
     anonymousId: str = Field(..., min_length=1, description="匿名用户ID（X-Anonymous-Id 的值）")
 
 
-# ── 启动时建表 ──
-
-_ensure_table_sql = """CREATE TABLE IF NOT EXISTS agentx_user (
-    id BIGSERIAL PRIMARY KEY,
-    user_id VARCHAR(64) NOT NULL,
-    username VARCHAR(50) NOT NULL,
-    password_hash VARCHAR(128) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uk_user_user_id ON agentx_user(user_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uk_user_username ON agentx_user(username);
-"""
-
-
 @router.post("/register")
 async def register(req: RegisterRequest):
     """注册新用户。"""
-    db = new_session()
     try:
-        db.execute(_ensure_table_sql)
-        db.commit()
-    except Exception:
-        db.rollback()
-        return error(500, "数据库不可用")
-
-    # 检查用户名是否已存在
-    existing = db.execute(
-        "SELECT id FROM agentx_user WHERE username = %s", (req.username,)
-    ).fetchone()
-    if existing:
-        db.close()
-        return error(400, "用户名已被注册")
-
-    import uuid
-    user_id = f"user_{uuid.uuid4().hex[:12]}"
-    hashed = hash_password(req.password)
-
-    try:
-        db.execute(
-            "INSERT INTO agentx_user (user_id, username, password_hash) VALUES (%s, %s, %s)",
-            (user_id, req.username, hashed),
+        identity = await run_in_threadpool(
+            identity_service.register,
+            req.username,
+            req.password,
         )
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        db.close()
-        return error(500, f"注册失败: {e}")
+    except UsernameAlreadyExistsError:
+        return error(400, "用户名已被注册")
+    except Exception:
+        logger.exception("注册失败")
+        return error(503, "数据库不可用")
 
-    db.close()
-    token = generate_token(user_id, req.username)
-    return ok({"token": token, "userId": user_id, "username": req.username})
+    token = generate_token(identity.user_id, identity.username)
+    return ok({
+        "token": token,
+        "userId": identity.user_id,
+        "username": identity.username,
+    })
 
 
 @router.post("/login")
 async def login(req: LoginRequest):
     """登录。返回 JWT。"""
-    db = new_session()
     try:
-        db.execute(_ensure_table_sql)
-        db.commit()
+        identity = await run_in_threadpool(
+            identity_service.login,
+            req.username,
+            req.password,
+        )
+    except InvalidCredentialsError:
+        return error(401, "用户名或密码错误")
     except Exception:
-        db.rollback()
-        db.close()
-        return error(500, "数据库不可用")
+        logger.exception("登录失败")
+        return error(503, "数据库不可用")
 
-    row = db.execute(
-        "SELECT user_id, username, password_hash FROM agentx_user WHERE username = %s",
-        (req.username,),
-    ).fetchone()
-    db.close()
-
-    if not row:
-        return error(401, "用户名或密码错误")
-
-    user_id, username, hashed = row
-    if not verify_password(req.password, hashed):
-        return error(401, "用户名或密码错误")
-
-    token = generate_token(user_id, username)
+    token = generate_token(identity.user_id, identity.username)
     return ok({
         "token": token,
-        "userId": user_id,
-        "username": username,
+        "userId": identity.user_id,
+        "username": identity.username,
         "message": "登录成功。请调用 /auth/sync 将匿名会话迁移到账号",
     })
 
@@ -137,26 +100,22 @@ async def sync_anonymous_sessions(req: SyncRequest, request: Request):
     if user_id.startswith("anon_"):
         return error(401, "请先登录再同步")
 
-    anonymous_id = f"anon_{req.anonymousId}"
-    db = new_session()
     try:
-        db.execute(
-            "UPDATE agentx_session SET user_id = %s WHERE user_id = %s",
-            (user_id, anonymous_id),
+        count = await run_in_threadpool(
+            identity_service.sync_anonymous_data,
+            req.anonymousId,
+            user_id,
         )
-        db.execute(
-            "UPDATE agentx_file SET user_id = %s WHERE user_id = %s",
-            (user_id, anonymous_id),
+        logger.info(
+            "[Auth] 同步匿名数据: anon_%s -> %s (%d)",
+            req.anonymousId,
+            user_id,
+            count,
         )
-        db.commit()
-        count = db.rowcount
-        db.close()
-        logger.info(f"[Auth] 同步匿名 session: {anonymous_id} → {user_id}")
-        return ok({"synced": True, "userId": user_id})
-    except Exception as e:
-        db.rollback()
-        db.close()
-        return error(500, f"同步失败: {e}")
+        return ok({"synced": True, "userId": user_id, "count": count})
+    except Exception:
+        logger.exception("同步匿名数据失败")
+        return error(503, "数据库不可用")
 
 
 @router.get("/me")

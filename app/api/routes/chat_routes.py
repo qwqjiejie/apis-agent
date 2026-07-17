@@ -7,10 +7,11 @@ import uuid
 
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.api.routes.agent_schemas import ChatRequest
 from app.api.dependencies import inspect_session_access
-from app.auth import get_current_user_id
+from app.modules.identity.auth import get_current_user_id
 from app.common.exceptions import QueryTooLongError, ValidationError
 from app.common.logger import logger
 from app.common.response import error
@@ -18,10 +19,10 @@ from app.common.streaming import extract_text_content, make_event, make_sse
 from app.config.settings import get_settings
 from app.evaluation.online_eval import EvalRecord, online_eval
 from app.gateway.status_events import drain_gateway_status, gateway_status_queue
-from app.harness.task_context import ChatContext
+from app.modules.tasks.context import ChatContext
 from app.prompt.triage_prompt import parse_capability_prefix
-from app.service import chat_service
-from app.service.session_service import store
+from app.modules.chat import service as chat_service
+from app.modules.chat.sessions import store
 
 router = APIRouter(tags=["agent"])
 legacy_router = APIRouter(tags=["agent"])
@@ -50,11 +51,11 @@ async def agent_chat(req: ChatRequest, request: Request):
     thread_id = conversation_id or str(uuid.uuid4())
 
     if conversation_id:
-        access = inspect_session_access(request, conversation_id)
+        access = await inspect_session_access(request, conversation_id)
         if access.exists and not access.allowed:
             return error(403, "无权访问该会话")
         try:
-            store.touch_last_active(conversation_id)
+            await run_in_threadpool(store.touch_last_active, conversation_id)
         except Exception:
             pass
 
@@ -139,7 +140,8 @@ async def agent_chat(req: ChatRequest, request: Request):
             for status_event in drain_gateway_status(status_queue):
                 yield make_event("status", **status_event)
             try:
-                chat_service.save_session(
+                await run_in_threadpool(
+                    chat_service.save_session,
                     thread_id,
                     clean_query,
                     full_answer,
@@ -166,7 +168,11 @@ async def agent_chat(req: ChatRequest, request: Request):
             if not conversation_id and full_answer.strip():
                 try:
                     title = await chat_service.generate_title(clean_query, full_answer)
-                    chat_service.update_session_title(thread_id, title)
+                    await run_in_threadpool(
+                        chat_service.update_session_title,
+                        thread_id,
+                        title,
+                    )
                 except Exception:
                     pass
             yield make_sse(json.dumps({"type": "complete"}, ensure_ascii=False))

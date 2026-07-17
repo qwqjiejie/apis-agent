@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any
 
 logger = logging.getLogger("apis")
 
@@ -197,7 +196,7 @@ class SemanticMemoryStore:
     def _embed_text(self, text: str) -> list[float] | None:
         """向量化文本。"""
         try:
-            from app.service.embedding_service import embed_query
+            from app.modules.documents.embedding import embed_query
             return embed_query(text)
         except Exception as e:
             logger.warning(f"[SemanticMemory] embedding 失败: {e}")

@@ -1,7 +1,6 @@
 """SkillsTool — 从 SkillManager 动态加载 enabled skills。"""
 
 import logging
-from typing import Any
 
 logger = logging.getLogger("apis")
 
@@ -11,11 +10,18 @@ def load_skills() -> list:
 
     DB 不可用时自动回退到文件系统扫描。
     """
-    from app.skill.skill_manager import skill_manager
+    from app.bootstrap.container import get_application_container
+    from app.modules.skills.manager import skill_manager as fallback_skill_manager
     from app.utils.frontmatter_utils import parse_frontmatter
     from pathlib import Path
 
-    dirs = skill_manager.get_enabled_skill_dirs()
+    container = get_application_container(required=False)
+    manager = (
+        container.skill_manager
+        if container is not None and container.skill_manager is not None
+        else fallback_skill_manager
+    )
+    dirs = manager.get_enabled_skill_dirs()
     tools = []
     for d in dirs:
         skill_md = Path(d) / "SKILL.md"

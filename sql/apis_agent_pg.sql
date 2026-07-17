@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS agentx_session (
     id              BIGSERIAL PRIMARY KEY,
     session_id      VARCHAR(64)  NOT NULL,
     user_id         VARCHAR(64)  NOT NULL DEFAULT '',
+    title           VARCHAR(100),
     question        TEXT,
     answer          TEXT,
     thinking        TEXT,
@@ -154,3 +155,18 @@ CREATE INDEX idx_feedback_session_id ON agentx_feedback(session_id);
 CREATE INDEX idx_feedback_user_id ON agentx_feedback(user_id, created_at DESC);
 
 COMMENT ON TABLE agentx_feedback IS '用户反馈表';
+
+
+-- =============================================================
+-- 7. 用户表
+-- =============================================================
+CREATE TABLE IF NOT EXISTS agentx_user (
+    id              BIGSERIAL PRIMARY KEY,
+    user_id         VARCHAR(64)  NOT NULL,
+    username        VARCHAR(50)  NOT NULL,
+    password_hash   VARCHAR(128) NOT NULL,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX uk_user_user_id ON agentx_user(user_id);
+CREATE UNIQUE INDEX uk_user_username ON agentx_user(username);

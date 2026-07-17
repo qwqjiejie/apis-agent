@@ -1,6 +1,6 @@
 # APIs Agent 架构优化实施计划
 
-> 状态：实施中  
+> 状态：已完成
 > 基线日期：2026-07-17  
 > 架构策略：模块化单体优先，按边界渐进重构，不在领域边界稳定前拆分微服务
 
@@ -14,18 +14,18 @@
 4. 将数据库变更、部署、测试和架构决策纳入可审计的工程流程。
 5. 保持现有 `/api/v1` 接口和核心运行流程兼容，分阶段迁移而不是一次性改目录。
 
-## 2. 当前差距
+## 2. 基线差距与整改结果
 
-| 维度 | 当前状态 | 目标状态 | 风险 |
+| 维度 | 基线问题 | 目标状态 | 整改结果 |
 | --- | --- | --- | --- |
-| 运行时装配 | 生命周期和多个模块级单例共同持有服务 | `bootstrap` 是唯一组合根，业务代码显式取依赖 | 同一服务可能存在多份状态 |
-| 模型网关 | 启动时创建实例，部分代码使用模块级实例 | Agent、RAG、管理接口共享同一实例 | 管理接口看到的状态与真实调用不一致 |
-| API 边界 | `agent.py` 混合聊天、任务、网关、反馈、PPT | 按 chat/tasks/admin/feedback 分路由 | 修改冲突和回归范围过大 |
-| 领域组织 | document、service、rag、storage 分散协作 | 按 chat/tasks/documents/identity/skills 聚合应用能力 | 跨目录跳转多，所有权不清晰 |
-| 基础设施 | `storage` 与 `stores` 并存，存在反向依赖 | 统一 infrastructure 适配器，端口由上层定义 | 难以替换和隔离测试 |
-| 初始化时机 | 文件服务、向量库、工具注册存在导入期副作用 | 所有连接和发现行为由生命周期显式启动 | 导入测试可能访问外部服务 |
-| 数据库治理 | 无迁移目录和版本基线 | Alembic 管理 schema 变更 | 环境结构容易漂移 |
-| 交付治理 | 缺少锁文件、CI、容器和部署基线 | 可复现依赖、分层测试、自动检查 | 本地可用但交付不可复现 |
+| 运行时装配 | 生命周期和模块级单例共同持有服务 | `bootstrap` 是唯一组合根 | 已完成，运行对象由 `ApplicationContainer` 持有 |
+| 模型网关 | 调用方可能使用不同实例 | Agent 和管理接口共享同一实例 | 已完成，统一注入进程级网关 |
+| API 边界 | `agent.py` 混合多个协议职责 | 按能力拆分路由 | 已完成，保留聚合入口 |
+| 领域组织 | document、service、rag 分散 | 按业务能力聚合 | 已完成，建立五个 `app/modules` 模块 |
+| 基础设施 | `storage` 与 `stores` 并存且反向依赖 | 统一 infrastructure 适配器 | 已完成，旧路径仅兼容导出 |
+| 初始化时机 | 导入期可能创建外部客户端 | 生命周期显式启动和关闭 | 已完成，增加关闭与降级测试 |
+| 数据库治理 | 无迁移目录和版本基线 | Alembic 管理 schema | 已完成，建立 `0001` 基线和 CI 检查 |
+| 交付治理 | 缺少锁文件、CI 和容器基线 | 可复现依赖和自动检查 | 已完成，提供 uv、CI、Docker 和 Compose |
 
 ## 3. 目标架构
 
@@ -116,47 +116,47 @@ Infrastructure Adapters
 
 ### 阶段 3：按业务能力收拢模块（P1）
 
-状态：**实施中**
+状态：**已完成**
 
 - [x] 先收拢 `documents`：上传、解析、状态、索引和检索形成完整用例边界。
-- [ ] 收拢 `tasks`：快照、Journal、审批、恢复和事件发布归属同一模块。
-- [ ] 收拢 `chat`、`identity`、`skills`，明确公共端口。
-- [ ] 删除空目录和不再使用的兼容实现。
+- [x] 收拢 `tasks`：快照、Journal、审批、恢复和事件发布归属同一模块。
+- [x] 收拢 `chat`、`identity`、`skills`，明确公共端口。
+- [x] 删除空目录和不再使用的兼容实现；仍有调用承诺的薄兼容导出登记在第 8 节。
 
 验收标准：新增一个业务能力时，可以在单一模块内找到入口、用例、模型、端口和测试。
 
 ### 阶段 4：基础设施与数据治理（P1）
 
-状态：未开始
+状态：**已完成**
 
-- [ ] 合并 `storage` / `stores` 的概念，按 PostgreSQL、Milvus、MinIO、Redis、Neo4j 分适配器。
-- [ ] 消除 `storage -> service` 反向依赖。
-- [ ] 统一异步数据库访问策略和连接生命周期。
-- [ ] 引入 Alembic，建立当前 schema 基线和迁移检查。
-- [ ] 为外部系统增加超时、重试、健康检查和降级策略测试。
+- [x] 合并 `storage` / `stores` 的概念，按 PostgreSQL、Milvus、MinIO、Redis、Neo4j 分适配器。
+- [x] 消除 `storage -> service` 反向依赖。
+- [x] 统一异步数据库访问策略和连接生命周期。
+- [x] 引入 Alembic，建立当前 schema 基线和迁移检查。
+- [x] 为外部系统增加超时、重试、健康检查和降级策略测试。
 
 验收标准：基础设施可由测试替身替换；schema 变更只能通过版本化迁移进入环境。
 
 ### 阶段 5：运行数据与配置边界（P2）
 
-状态：未开始
+状态：**已完成**
 
-- [ ] 将上传文件、动态 Skill 和生成物迁移到可配置运行数据目录。
-- [ ] 源码目录只保留静态代码和受版本控制的声明文件。
-- [ ] 清理 `.idea` 等个人 IDE 元数据并完善 `.gitignore`。
-- [ ] 统一环境变量命名、默认值和生产校验。
+- [x] 将上传文件、动态 Skill 和生成物迁移到可配置运行数据目录。
+- [x] 源码目录只保留静态代码和受版本控制的声明文件。
+- [x] 清理 `.idea` 等个人 IDE 元数据并完善 `.gitignore`。
+- [x] 统一环境变量命名、默认值和生产校验。
 
 验收标准：只读源码镜像可以运行；运行时写入不会污染 Git 工作区。
 
 ### 阶段 6：工程化交付基线（P1）
 
-状态：未开始
+状态：**已完成**
 
-- [ ] 生成并提交 `uv.lock`，明确支持的 Python 版本。
-- [ ] 建立 CI：lint、类型检查、单元测试、契约测试、集成测试。
-- [ ] 提供 Dockerfile、Compose/本地基础设施和生产部署示例。
-- [ ] 将测试分为 unit、integration、contract、e2e，并定义 marker。
-- [ ] 在 `docs/adr` 记录模型网关、任务持久化、数据目录和部署拓扑决策。
+- [x] 生成并提交 `uv.lock`，明确支持的 Python 版本。
+- [x] 建立 CI：lint、类型检查、单元测试、契约测试、集成测试。
+- [x] 提供 Dockerfile、Compose/本地基础设施和生产部署示例。
+- [x] 将测试分为 unit、integration、contract、e2e，并定义 marker。
+- [x] 在 `docs/adr` 记录模型网关、任务持久化、数据目录和部署拓扑决策。
 
 验收标准：新环境可通过文档化命令复现；每次合并自动验证依赖、代码质量和关键契约。
 
@@ -184,3 +184,26 @@ Infrastructure Adapters
 | 2026-07-17 | 统一会话资源归属检查和 SSE 契约 | 完成，阶段 2 收口 |
 | 2026-07-17 | 阶段 3：收拢 documents 业务模块 | 完成，旧路径保留兼容导出 |
 | 2026-07-17 | documents 模块全量回归 | 98 项通过；5 项仍受 PostgreSQL 沙箱连接限制 |
+| 2026-07-17 | 阶段 3：收拢 tasks 业务模块 | 完成，生产依赖切至 `app.modules.tasks`，`app.harness` 保留兼容导出 |
+| 2026-07-17 | tasks 模块聚焦与全量回归 | 聚焦 25 项通过；全量 99 项通过，5 项仍受 PostgreSQL 沙箱连接限制 |
+| 2026-07-17 | 阶段 3：收拢 chat、identity、skills | 完成，API 和工具统一依赖业务模块 |
+| 2026-07-17 | 阶段 4：统一基础设施与数据库治理 | 完成，建立 infrastructure、事务边界、可靠性策略和 Alembic `0001`/`0002` |
+| 2026-07-17 | 阶段 5：运行数据与配置边界 | 完成，动态文件统一写入 `DATA_DIR`，移除 `.idea` 跟踪 |
+| 2026-07-17 | 阶段 6：工程化交付基线 | 完成，提交 uv 锁、CI、Docker/Compose、分层测试、ADR 和目录蓝图 |
+| 2026-07-17 | 最终质量检查 | Ruff、mypy、compileall、Alembic SQL、uv lock 检查通过；unit + contract 106 项通过 |
+| 2026-07-17 | PostgreSQL 迁移与 integration | 旧库登记 `0001` 后升级 `0002`；9 项全部通过 |
+| 2026-07-17 | 最终全量回归 | 115 项全部通过 |
+
+## 8. 兼容导出登记
+
+以下路径只保留显式 re-export，不包含业务实现，新代码不得继续引用：
+
+| 旧命名空间 | 权威实现 | 删除条件 |
+| --- | --- | --- |
+| `app.harness.task_*`、`event_bus`、`dead_letter` | `app.modules.tasks` | 下一个破坏性版本确认无外部导入后删除 |
+| `app.service` 中 chat/session/feedback/embedding/rag/file | `app.modules.chat`、`app.modules.documents` | 外部扩展迁移完成后删除 |
+| `app.auth`、`app.skill.skill_manager` | `app.modules.identity`、`app.modules.skills` | 公共导入文档切换一个版本后删除 |
+| `app.storage`、`app.stores`、`app.common.redis` | `app.infrastructure` | 外部 Repository/Store 调用迁移后删除 |
+| `app.document`、`app.rag`、文档相关 `app.utils` | `app.modules.documents` | 插件和离线脚本不再使用旧路径后删除 |
+
+兼容层通过契约测试验证类和单例身份，删除必须作为独立变更并提供迁移说明。

@@ -12,7 +12,7 @@ from langgraph.types import Command
 
 from app.bootstrap.container import get_application_container
 from app.common.streaming import extract_text_content, make_event, make_sse
-from app.harness.task_context import ChatContext
+from app.modules.tasks.context import ChatContext
 
 logger = logging.getLogger("apis")
 

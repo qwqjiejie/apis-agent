@@ -85,6 +85,13 @@ async def _do_rebuild(app: FastAPI):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
+    for runtime_dir in (
+        s.upload_path,
+        s.managed_skills_path,
+        s.artifacts_path,
+        s.evaluation_results_path,
+    ):
+        runtime_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 1. 模型网关 ────────────────────────────────
     from app.gateway.model_gateway import ModelGateway
@@ -106,7 +113,7 @@ async def lifespan(app: FastAPI):
     app.state.model_gateway = gateway
 
     # ── 2. PG Store (checkpointer + store) ─────────
-    from app.stores.pg_store import pg_store_manager
+    from app.infrastructure.postgres.langgraph_store import pg_store_manager
     app.state.checkpointer = None
     app.state.store = None
     if await pg_store_manager.initialize():
@@ -119,12 +126,14 @@ async def lifespan(app: FastAPI):
     app.state.minio_client = None
     if s.minio_host:
         try:
-            from minio import Minio
-            minio = Minio(f"{s.minio_host}:{s.minio_port}",
-                          access_key=s.minio_access_key,
-                          secret_key=s.minio_secret_key, secure=False)
-            if not minio.bucket_exists(s.minio_bucket):
-                minio.make_bucket(s.minio_bucket)
+            from app.infrastructure.minio.client import (
+                check_minio,
+                create_minio_client,
+            )
+            minio = create_minio_client(s)
+            health = await asyncio.to_thread(check_minio, minio, s)
+            if not health.available:
+                raise RuntimeError(health.detail)
             app.state.minio_client = minio
             logger.info(f"[main] MinIO 已连接: {s.minio_host}")
         except Exception as e:
@@ -133,7 +142,7 @@ async def lifespan(app: FastAPI):
 
     # ── 3. 文档基础设施 ────────────────────────────────
     from app.modules.documents.service import file_service
-    from app.storage.vector_store import vector_store
+    from app.infrastructure.milvus.vector_store import vector_store
 
     vector_store.connect()
     file_service.configure(
@@ -159,7 +168,7 @@ async def lifespan(app: FastAPI):
         store=container.store,
     )
     app.state.agent = container.agent
-    logger.info(f"[main] Triage DeepAgent 创建完成 (subagents=%d)", len(subagents))
+    logger.info("[main] Triage DeepAgent 创建完成 (subagents=%d)", len(subagents))
 
     # ── 5. 创建 Executor DeepAgent ──────────────────
     container.executor_agent = await create_executor_agent(
@@ -172,15 +181,15 @@ async def lifespan(app: FastAPI):
     logger.info("[main] Executor DeepAgent 创建完成")
 
     # ── 6. 任务运行时依赖 ────────────────────────────
-    from app.harness.dead_letter import DeadLetterQueue
-    from app.harness.event_bus import EventBus
-    from app.harness.task_context import (
+    from app.modules.tasks.context import (
         MemoryTaskStore,
         PgTaskStore,
         TaskContextManager,
         TaskSnapshot,
     )
-    from app.harness.task_executor import TaskExecutor
+    from app.modules.tasks.dead_letter import DeadLetterQueue
+    from app.modules.tasks.events import EventBus
+    from app.modules.tasks.executor import TaskExecutor
     from app.memory.semantic_memory import SemanticMemoryStore
 
     if container.store is not None:
@@ -228,22 +237,20 @@ async def lifespan(app: FastAPI):
     dead_letter_queue.register_retry_handler("task_journal_append", _retry_journal)
 
     # ── 7. SkillManager ─────────────────────────────
-    from app.skill.skill_manager import skill_manager
-    from app.storage.db import new_session
-    try:
-        skill_manager.init_db(new_session())
-    except Exception as e:
-        logger.warning(f"SkillManager 初始化跳过: {e}")
+    from app.modules.skills.manager import SkillManager
+    skill_manager = SkillManager()
+    await asyncio.to_thread(skill_manager.initialize)
+    container.skill_manager = skill_manager
 
     # ── 8. Neo4j（可选）──────────────────────────────
-    from app.stores.neo4j_manager import neo4j_manager
+    from app.infrastructure.neo4j.manager import neo4j_manager
     try:
         await neo4j_manager.initialize(s.neo4j_uri, s.neo4j_user, s.neo4j_password)
     except Exception as e:
         logger.warning(f"Neo4j 初始化跳过: {e}")
 
     # ── 9. 事件总线 ─────────────────────────────────
-    from app.common.redis import get_redis
+    from app.infrastructure.redis.client import get_redis
     try:
         redis_client = await get_redis()
         event_bus.set_redis(redis_client)
@@ -282,12 +289,17 @@ async def lifespan(app: FastAPI):
     await hot_reloader.stop()
     await sa_reloader.stop()
     await dead_letter_queue.stop_scanner()
+    skill_manager.close()
     await gateway.stop_probe()
     vector_store.close()
     if pg_store_manager.available:
         await pg_store_manager.close()
     if neo4j_manager.available:
         await neo4j_manager.close()
+    from app.infrastructure.redis.client import close_redis
+    await close_redis()
+    from app.infrastructure.postgres.database import dispose_database
+    dispose_database()
     clear_application_container(container)
 
 
@@ -337,6 +349,51 @@ app.include_router(session_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1")
 app.include_router(skill_router)
 app.include_router(auth_router)
+
+
+@app.get("/health/live", include_in_schema=False)
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def health_ready():
+    from app.infrastructure.milvus.vector_store import vector_store
+    from app.infrastructure.postgres.database import check_db
+    from app.infrastructure.redis.client import health_check as redis_health_check
+
+    checks = []
+    try:
+        await asyncio.to_thread(check_db)
+        checks.append({"service": "PostgreSQL", "available": True})
+    except Exception as exc:
+        checks.append({
+            "service": "PostgreSQL",
+            "available": False,
+            "detail": str(exc),
+        })
+
+    redis_result = await redis_health_check()
+    checks.append({
+        "service": redis_result.service,
+        "available": redis_result.available,
+        "detail": redis_result.detail,
+    })
+
+    if get_settings().milvus_host:
+        milvus_result = await asyncio.to_thread(vector_store.health_check)
+        checks.append({
+            "service": milvus_result.service,
+            "available": milvus_result.available,
+            "detail": milvus_result.detail,
+        })
+
+    ready = all(check["available"] for check in checks)
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "unavailable", "checks": checks},
+    )
+
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.isdir(STATIC_DIR):
