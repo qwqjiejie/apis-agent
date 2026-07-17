@@ -1,427 +1,486 @@
-# APIs-Agent — 企业级多智能体协作系统
+# APIs-Agent
 
-基于 **FastAPI + deepagents + LangGraph** 构建的多智能体平台。采用 Triage/Executor 双层 DeepAgent 架构，SubAgent 声明式注册，LLM 自路由分流。
+基于 **FastAPI + deepagents + LangGraph** 构建的多智能体协作平台。系统采用
+Triage、Executor、Specialist 三层协作模型：Triage 处理同步对话与任务分流，
+Executor 驱动长周期后台任务，Specialist 通过声明式 `AGENT.md` 提供领域能力。
 
-## 核心特性
+当前仓库同时包含后端 API、轻量前端、任务可靠性组件、文档 RAG、Skills 管理和
+在线/离线评估工具，是一个单体部署、模块化组织的 Python 应用。
 
-- **双层 DeepAgent 架构** — Triage DeepAgent（分流）+ ExecutorAgent（后台执行），启动时创建单例，热加载原子替换
-- **原生 SubAgent 机制** — deepagents 框架内置 `SubAgentMiddleware`，LLM 通过 `task` 工具原生 spawn 子代理，独立 tools + 独立上下文
-- **声明式扩展** — 在 `app/subagents/<name>/AGENT.md` 中声明 name/description/allowed_tools，系统自动发现注入
-- **LLM 自路由** — 不依赖外部分类器，LLM 通过 Function Calling 自主判断：直接回答 / spawn Specialist / 创建后台任务
-- **能力前缀** — 前端通过 `生成ppt:` / `深度研究:` / `分析文档:` 等前缀传递能力选择
-- **模型网关 + 熔断器** — 多模型注册、三态熔断、后台健康探活、零停机热切换
-- **后台任务引擎** — 完整的 TaskExecutor：submit/cancel/HITL 挂起恢复/审批兜底/死信重试
-- **RAG 检索流水线** — 查询重写 → 多路召回 + RRF 融合 → 动态 TopK → LLM 相关性过滤
-- **语义长期记忆** — PostgreSQL Store 跨会话持久化，按用户隔离并自动向量化检索
-- **Skills 管理体系** — DB 生命周期管理 + zip 上传 + 启用/禁用 + 定时同步
-- **知识图谱增强** — Neo4j Graph RAG（可选，未配置自动降级）
-- **多层降级容错** — PostgreSQL/Redis/MinIO/Milvus/Neo4j 不可用时自动降级
-- **轻量多租户** — 匿名可用 + 注册登录 + JWT 认证 + 匿名会话迁移
+## 核心能力
+
+- **三层 Agent 协作**：Triage DeepAgent -> Executor DeepAgent -> Specialist SubAgent
+- **LLM 自主路由**：通过 Function Calling 决定直接回答、调用工具、委托 Specialist 或创建后台任务
+- **声明式 Specialist**：扫描 `app/subagents/*/AGENT.md`，按 `allowed_tools` 注入最小工具集
+- **统一 Agent 工厂**：Triage 与 Executor 复用 `create_deep_agent`、中间件和模型网关
+- **模型可靠性**：动态模型链、健康探活、三态熔断、调用级降级、热切换和 SSE 状态事件
+- **后台任务引擎**：任务快照、用户归属校验、HITL 挂起/恢复、Journal、EventBus、DeadLetter
+- **持久化运行时**：LangGraph AsyncPostgresSaver、AsyncPostgresStore 和 PG TaskStore
+- **文档处理**：类型/MIME 校验、SHA-256 去重、MinIO/本地暂存、文本解析、分块和向量索引
+- **增强 RAG**：查询重写、多路并行召回、RRF、动态 TopK、LLM 相关性过滤
+- **跨会话记忆**：按用户保存语义记忆，并在新请求中召回相关历史问答
+- **Skills 管理**：运行时 Skill 扫描、数据库状态、zip 上传、启用/禁用和删除
+- **轻量身份体系**：匿名身份、JWT 注册登录、匿名会话迁移，以及会话/文件/任务归属校验
+- **可观测性**：trace ID、结构化运行状态、Langfuse、在线指标采集和 deepEval 离线评估
+- **热加载**：工具模块和 Specialist 定义变更后重建 Triage/Executor，并原子替换应用引用
+
+## 已内置 Specialist
+
+| Specialist | 目录 | 主要职责 |
+|---|---|---|
+| `ppt_specialist` | `app/subagents/ppt` | PPT 生成 |
+| `research_specialist` | `app/subagents/research` | 深度研究和信息综合 |
+| `file_analysis_specialist` | `app/subagents/file_analysis` | 上传文档分析 |
+| `data_analysis_specialist` | `app/subagents/data_analysis` | 数据分析和报告 |
+| `code_review_specialist` | `app/subagents/code_review` | 代码质量、安全和性能审查 |
+| `coding_specialist` | `app/subagents/coding` | 代码编写、修改和调试 |
 
 ## 技术栈
 
 | 层级 | 技术 |
-|------|------|
-| 框架 | FastAPI + Uvicorn |
-| Agent 编排 | deepagents (create_deep_agent + SubAgentMiddleware) |
-| 状态持久化 | LangGraph (AsyncPostgresSaver + AsyncPostgresStore) |
-| LLM | OpenAI 兼容 API (DeepSeek V4 / GPT-4o / Qwen 等) |
-| 搜索引擎 | Tavily Search API (MCP 集成) |
-| 向量数据库 | Milvus 2.4+ |
-| 关系数据库 | PostgreSQL 16+ (SQLAlchemy 2.0 + asyncpg + psycopg) |
-| 知识图谱 | Neo4j (可选) |
-| 对象存储 | MinIO |
-| 缓存/锁 | Redis |
-| 文档解析 | pdfplumber + python-docx + MinerU (可选) |
-| 可观测性 | Langfuse 追踪 + trace_id 全链路日志 |
-| 评估 | deepEval |
+|---|---|
+| Web/API | FastAPI、Uvicorn、SSE Starlette |
+| Agent 编排 | deepagents、LangChain、LangGraph |
+| 模型接口 | OpenAI-compatible Chat API |
+| 状态持久化 | AsyncPostgresSaver、AsyncPostgresStore |
+| 业务数据 | PostgreSQL、SQLAlchemy、psycopg2 |
+| 缓存与事件 | Redis Pub/Sub、进程内降级 EventBus |
+| 向量检索 | Milvus、Embedding API |
+| 文件存储 | MinIO，本地临时文件兜底 |
+| 文档解析 | pdfplumber、python-docx、MinerU 可选 |
+| 图数据 | Neo4j 可选 |
+| 搜索 | Tavily |
+| 可观测性 | Langfuse、trace ID、在线评估 |
+| 质量评估 | pytest、deepEval |
+
+## 架构总览
+
+```text
+Client / Static Web
+        |
+        v
+FastAPI: CORS -> RateLimit -> Trace/Logging -> Routes
+        |
+        v
+Triage DeepAgent (app.state.agent)
+        |
+        +-- 直接回答 / 调用工具
+        |
+        +-- task tool -> Specialist SubAgent
+        |
+        `-- create_background_task
+                    |
+                    v
+              TaskExecutor
+                    |
+                    v
+         Executor DeepAgent (app.state.executor_agent)
+                    |
+                    +-- Specialist SubAgent
+                    +-- request_approval -> HITL interrupt/resume
+                    `-- TaskSnapshot + Journal + EventBus
+                                |
+                                v
+                  AsyncPostgresStore / Memory fallback
+```
+
+### 分层职责
+
+| 层级 | 目录 | 职责 |
+|---|---|---|
+| 启动与传输 | `app/main.py`、`app/api` | 基础设施预检、FastAPI lifespan、中间件、路由和 SSE |
+| Agent 编排 | `app/agent`、`app/subagents`、`app/prompt` | Agent 构建、Executor 包装、领域代理和系统提示词 |
+| 可靠性 Harness | `app/harness` | 任务生命周期、快照、Journal、HITL、事件总线、DLQ 和热加载 |
+| 模型网关 | `app/gateway` | 模型注册、健康状态、熔断、动态路由和状态事件 |
+| RAG 与文档 | `app/rag`、`app/document`、`app/readers` | 检索管线、文档状态、解析和图谱能力 |
+| 业务服务 | `app/service` | 会话、文件、Embedding 和 RAG 服务 |
+| 数据访问 | `app/storage`、`app/stores` | 业务表 Repository、Milvus、LangGraph PG Store 和 Neo4j |
+| 记忆与上下文 | `app/memory`、`app/context` | 语义记忆、token 统计和上下文压缩工具 |
+| 扩展能力 | `app/tool`、`app/skill`、`app/skills` | Agent 工具注册和应用运行时 Skills 管理 |
+| 评估 | `app/evaluation` | 在线采集、离线 Agent/RAG 评估和数据集 |
+
+## 核心运行流程
+
+### 对话流程
+
+1. `POST /api/v1/chat` 接收 `message`、`conversationId` 和 `fileIds`。
+2. 限流中间件按 IP 和会话执行滑动窗口检查，并在 Redis 不可用时使用进程内计数。
+3. 认证层从 JWT 或 `X-Anonymous-Id` 得到用户身份，并校验已有会话归属。
+4. 路由解析能力前缀，将文件 ID、跨会话语义记忆和已完成后台任务结果注入上下文。
+5. Triage DeepAgent 自主选择直接回答、调用工具、委托 Specialist 或创建后台任务。
+6. Agent 事件转换为 SSE，输出 `thinking`、`text`、`tool_start`、`tool_end`、`status` 和完成事件。
+7. 流结束后保存会话、记录在线评估、异步写入语义记忆，并为新会话生成标题。
+
+### 后台任务与 HITL
+
+1. `create_background_task` 从当前 `ChatContext` 继承 `user_id` 和 `session_id`。
+2. TaskExecutor 创建 TaskSnapshot，持久化后立即返回任务 ID。
+3. Executor DeepAgent 编排 Specialist 执行长任务，并持续写入快照和 Journal。
+4. `request_approval` 触发 LangGraph interrupt，任务进入 `waiting_human`。
+5. `/api/v1/agent/task/resume` 将 `approved` 或 `rejected` 映射为 DeepAgents HITL decision，并从原 checkpoint 继续执行。
+6. 快照或 Journal 写入失败时进入 DeadLetter，后台扫描器每 120 秒重试。
+7. 优雅关闭时等待运行任务，超时任务保存恢复提示后取消。
+
+启动恢复的当前语义：
+
+- `waiting_human` 任务保留挂起状态，可在重启后继续审批。
+- `created` 或 `executing` 任务因缺少完整运行时恢复能力，会被标记为 `cancelled`。
+
+### 文档与 RAG
+
+```text
+Upload
+  -> 文件类型/MIME/大小校验
+  -> 用户范围内同名检测
+  -> 本地临时文件 + 可选 MinIO
+  -> MinerU(PDF 可用时) / 默认解析器
+  -> 文本分块
+  -> Embedding
+  -> Milvus file_chunks
+
+Query
+  -> QueryRewriter
+  -> 多路并行向量检索
+  -> RRF 融合
+  -> file_id 过滤
+  -> Dynamic TopK
+  -> LLM Relevance Filter
+  -> RAG context
+```
+
+`app/rag/graph_rag.py` 和 Neo4j 管理器已经提供图谱检索基础组件，但当前默认
+`rag_service` 尚未把 GraphRAG 接入主检索链路。
+
+### 模型网关
+
+每次模型调用都通过 `GatewayModelWrapper` 动态获取可用模型链，而不是在 Agent
+创建时固定单一模型。调用流程包括：
+
+1. 跳过处于 OPEN 状态的模型。
+2. 按主模型和 fallback 顺序尝试调用。
+3. 记录成功率、连续错误和延迟分位数。
+4. 更新三态熔断器 `CLOSED -> OPEN -> HALF_OPEN`。
+5. 降级时通过 SSE `status` 事件通知前端。
+6. 管理接口热切换活跃模型，后续调用立即使用新模型。
+
+## 启动与关闭
+
+### 推荐启动路径
+
+```text
+python app/main.py
+  -> PostgreSQL / Redis / 已配置 Milvus 预检
+  -> 启动 app.api.main:app
+  -> FastAPI lifespan 初始化运行时组件
+```
+
+lifespan 初始化顺序：
+
+1. ModelGateway、主模型、可选 fallback 和健康探活。
+2. LangGraph PostgreSQL checkpointer/store。
+3. 可选 MinIO。
+4. Specialist 发现，创建 Triage 和 Executor DeepAgent。
+5. TaskStore、TaskExecutor、TaskContextManager。
+6. DeadLetter 及快照/Journal 重试处理器。
+7. SemanticMemory 和 SkillManager。
+8. 可选 Neo4j、Redis EventBus。
+9. DeadLetter 扫描器、Tool/SubAgent 热加载器。
+10. 处理持久化的未完成任务。
+
+关闭时依次排干后台任务、停止热加载和 DLQ 扫描、停止模型探活，并关闭 PG 和
+Neo4j 连接。
+
+### 基础设施策略
+
+| 组件 | 推荐入口行为 | lifespan 内部行为 |
+|---|---|---|
+| PostgreSQL | 预检失败则拒绝启动 | LangGraph Store 初始化失败时任务层可退回内存 |
+| Redis | 预检失败则拒绝启动 | EventBus/RateLimit 支持进程内降级 |
+| Milvus | 配置 `MILVUS_HOST` 后预检 | 不可用时跳过向量检索 |
+| MinIO | 不参与启动预检 | 不可用时保留本地解析流程 |
+| Neo4j | 不参与启动预检 | 不可用时跳过图谱能力 |
+| Langfuse | 不参与启动预检 | 未配置时关闭追踪集成 |
+
+如直接运行 `uvicorn app.api.main:app`，会绕过 `app/main.py` 的基础设施预检，主要
+用于测试或降级调试，不建议作为生产启动命令。
 
 ## 快速开始
 
 ### 环境要求
 
 - Python 3.11+
-- PostgreSQL 16+（必需）
-- Redis（可选，不配置则降级为本地模式）
-- MinIO（可选，不配置则降级为本地文件存储）
-- Milvus 2.4+（可选，不配置则跳过向量检索）
-- Neo4j（可选，不配置则跳过知识图谱）
+- PostgreSQL 16+
+- Redis
+- 可选：Milvus 2.4+、MinIO、Neo4j、Langfuse、MinerU
+- 可访问的 OpenAI-compatible LLM API
 
-### 1. 安装依赖
+### 1. 安装
 
 ```bash
-git clone <repo-url>
-cd apis-agent
-
 python -m venv .venv
 source .venv/bin/activate
-
+python -m pip install --upgrade pip
 pip install -e ".[dev]"
 ```
 
-### 2. 配置环境变量
+### 2. 配置
 
 ```bash
 cp .env.example .env
 ```
 
-```bash
-# 必需：LLM API Key
-LLM_API_KEY="sk-your-api-key-here"
-LLM_BASE_URL="https://api.openai.com/v1"
-LLM_MODEL="gpt-4o"
+最小生产配置示例：
 
-# 必需：Tavily 搜索
-TAVILY_API_KEY="tvly-your-tavily-key-here"
+```dotenv
+LLM_API_KEY=sk-your-api-key-here
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o
+JWT_SECRET=replace-with-a-long-random-secret
 
-# 必需：PostgreSQL
 PG_HOST=127.0.0.1
 PG_PORT=5432
 PG_USER=postgres
-PG_PASSWORD=123456
+PG_PASSWORD=replace-me
 PG_DB=apis_agent
 
-# 可选：Redis
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
 
-# 可选：MinIO
-MINIO_HOST=127.0.0.1
-MINIO_PORT=9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=apis
-
-# 可选：Milvus
-MILVUS_HOST=127.0.0.1
-MILVUS_PORT=19530
-
-# 可选：Neo4j 知识图谱
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=password
+TAVILY_API_KEY=tvly-your-tavily-key-here
 ```
 
-> 完整配置项见 `.env.example`。
+完整配置见 `.env.example`。`LLM_API_KEY` 必填；生产环境必须设置稳定的高强度
+`JWT_SECRET`，否则服务重启后已有令牌会失效。
 
-### 3. 初始化数据库
+### 3. 初始化业务表
 
 ```bash
 psql -d apis_agent -f sql/apis_agent_pg.sql
 ```
 
-### 4. 启动服务
+LangGraph checkpointer/store 表由 `AsyncPostgresSaver.setup()` 和
+`AsyncPostgresStore.setup()` 在启动时创建。
+
+### 4. 启动
 
 ```bash
 python app/main.py
 ```
 
-- API 文档：http://localhost:8080/docs
-- 前端界面：http://localhost:8080/
+- 前端：<http://localhost:8080/>
+- OpenAPI：<http://localhost:8080/docs>
+- OpenAPI JSON：<http://localhost:8080/openapi.json>
 
-## 架构总览
+## API
 
-```
-POST /api/v1/chat  {"message":"生成ppt: AI趋势"}
-       │
-       ▼
-┌──────────────────────────────┐
-│  CORS + RateLimit + 日志 + 追踪 │
-└──────────────┬───────────────┘
-               │
-               ▼
-┌──────────────────────────────┐
-│  request.app.state.agent      │  ← 启动时创建的单例 Triage DeepAgent
-│  (CompiledStateGraph)         │
-└──────────────┬───────────────┘
-               │
-    ┌──────────┼──────────┐
-    ▼          ▼          ▼
-  直接回答   spawn子代理   后台任务
-  (工具调用)  (task工具)   (create_background_task)
-               │              │
-               ▼              ▼
-        SubAgentMiddleware   TaskExecutor
-        (独立 tools+prompt)  (Executor DeepAgent)
-                                 │
-                                 ▼
-                            HITL 审批
-                         (interrupt/resume)
-```
+除 Skills 和认证路由已经包含完整前缀外，其余业务 Router 在应用装配时统一挂载到
+`/api/v1`。接口以 POST JSON 为主，上传使用 multipart，流式接口返回 SSE。
 
-### 启动流程 (lifespan)
+### 对话、任务与管理
 
-```
-1. 构建 ModelGateway → 注册主模型 + 降级模型 + 健康探活
-2. PG Store 初始化 → checkpointer + store (AsyncPostgresSaver + AsyncPostgresStore)
-3. MinIO 初始化
-4. 扫描 app/subagents/*/AGENT.md → 构建 SubAgent 列表
-5. create_triage_agent() → app.state.agent (单例)
-6. create_executor_agent() → app.state.executor_agent (单例)
-7. TaskExecutor 注入 executor_agent
-8. 启动 EventBus / DeadLetter / 热加载 / Skills 同步
-```
-
-### 请求处理流程
-
-```
-1. RateLimit 中间件检查
-2. 解析 ChatRequest → message, conversationId, fileIds, online
-3. 解析能力前缀 (生成ppt:/深度研究:/等)
-4. 获取 app.state.agent (单例)
-5. 构造 config = {thread_id, recursion_limit}
-6. agent.astream_events() → SSE 流式输出
-7. 保存会话 → agentx_session
-8. 首次对话 → LLM 生成标题
-9. 异步存储语义记忆
-```
-
-### 热加载流程
-
-```
-tool/*.py 变更
-  → ToolHotReloader → importlib.reload() → TOOL_REGISTRY 更新
-  → _rebuild_agents() → 重新构建 Agent → app.state.agent = new_agent
-
-specialist/*/AGENT.md 变更
-  → SubAgentHotReloader → _rebuild_agents() → 原子替换
-
-进行中的请求不受影响（已持有旧 Agent 引用）
-```
-
-## API 端点
-
-所有 API 前缀 `/api/v1`，统一使用 POST + JSON body（文件上传除外）。
-
-### Agent
-
-| 端点 | 用途 |
-|------|------|
-| `/api/v1/chat` | 统一对话入口（`/api/v1/agent/chat` 为兼容别名） |
-| `/api/v1/agent/pptx/download` | PPT 文件下载 |
-| `/api/v1/agent/stop` | 停止运行中的 Agent |
-| `/api/v1/agent/shell/confirm` | Shell 命令安全确认 |
-| `/api/v1/agent/task/status` | 后台任务状态查询 |
-| `/api/v1/agent/task/stream` | 后台任务 SSE 进度 |
-| `/api/v1/agent/task/cancel` | 取消后台任务 |
-| `/api/v1/agent/task/list` | 后台任务列表 |
-| `/api/v1/agent/feedback` | 用户反馈 |
-| `/api/v1/agent/admin/gateway` | 网关状态查询 |
-| `/api/v1/agent/admin/gateway/switch` | 模型热切换 |
+| Method | Endpoint | 说明 |
+|---|---|---|
+| POST | `/api/v1/chat` | 推荐的统一对话入口 |
+| POST | `/api/v1/agent/chat` | 兼容入口，已标记 deprecated |
+| POST | `/api/v1/agent/pptx/download` | 下载生成的 PPT |
+| POST | `/api/v1/agent/stop` | 通过 Redis 发布停止信号 |
+| POST | `/api/v1/agent/shell/confirm` | 确认或拒绝待执行 Shell 命令 |
+| POST | `/api/v1/agent/task/status` | 查询用户所属任务状态 |
+| POST | `/api/v1/agent/task/stream` | 获取任务状态 SSE 快照 |
+| POST | `/api/v1/agent/task/list` | 列出当前用户任务 |
+| POST | `/api/v1/agent/task/cancel` | 取消当前用户任务 |
+| POST | `/api/v1/agent/task/resume` | 恢复 `waiting_human` 任务 |
+| POST | `/api/v1/agent/feedback` | 提交会话反馈 |
+| POST | `/api/v1/agent/admin/gateway` | 查询模型网关状态 |
+| POST | `/api/v1/agent/admin/gateway/switch` | 切换活跃模型 |
 
 ### 会话
 
-| 端点 | 用途 |
-|------|------|
-| `/api/v1/session` | 创建新会话 |
-| `/api/v1/session/list` | 会话列表（分页） |
-| `/api/v1/session/detail` | 会话详情（含消息） |
-| `/api/v1/session/delete` | 删除会话 |
+| Method | Endpoint | 说明 |
+|---|---|---|
+| POST | `/api/v1/session` | 创建会话 ID |
+| POST | `/api/v1/session/list` | 当前用户会话分页列表 |
+| POST | `/api/v1/session/detail` | 会话详情和消息 |
+| POST | `/api/v1/session/delete` | 删除当前用户会话 |
 
 ### 文件
 
-| 端点 | 用途 |
-|------|------|
-| `/api/v1/file/list` | 文件列表 |
-| `/api/v1/file/upload` | 文件上传（multipart） |
-| `/api/v1/file/info` | 文件元数据 |
-| `/api/v1/file/content` | 文件文本内容 |
-| `/api/v1/file/delete` | 删除文件 |
+| Method | Endpoint | 说明 |
+|---|---|---|
+| POST | `/api/v1/file/list` | 当前用户文件分页列表 |
+| POST | `/api/v1/file/upload` | multipart 文件上传 |
+| POST | `/api/v1/file/info` | 文件元数据 |
+| POST | `/api/v1/file/content` | 已解析文本 |
+| POST | `/api/v1/file/delete` | 删除文件、对象和向量块 |
+| POST | `/api/v1/file/exists` | 检查当前用户文件是否存在 |
+| POST | `/api/v1/file/progress` | 文档处理进度 SSE |
 
 ### 认证
 
-| 端点 | 用途 |
-|------|------|
-| `/api/v1/auth/register` | 注册 |
-| `/api/v1/auth/login` | 登录 |
-| `/api/v1/auth/sync` | 匿名会话迁移 |
-| `/api/v1/auth/me` | 当前用户信息 |
+| Method | Endpoint | 说明 |
+|---|---|---|
+| POST | `/api/v1/auth/register` | 注册并签发 JWT |
+| POST | `/api/v1/auth/login` | 登录并签发 JWT |
+| POST | `/api/v1/auth/sync` | 将匿名会话和文件迁移到登录用户 |
+| GET | `/api/v1/auth/me` | 返回当前身份和匿名状态 |
+
+身份解析优先级：`Authorization: Bearer <token>` -> `X-Anonymous-Id` -> 请求级临时匿名 ID。
 
 ### Skills
 
-| 端点 | 用途 |
-|------|------|
-| `/api/v1/skills` | Skills 列表 |
-| `/api/v1/skills/upload` | 上传 Skill zip |
-| `/api/v1/skills/{name}/toggle` | 启用/禁用 |
-| `/api/v1/skills/{name}` | 删除 Skill |
+| Method | Endpoint | 说明 |
+|---|---|---|
+| GET | `/api/v1/skills` | 列出数据库中的 Skills |
+| POST | `/api/v1/skills/upload` | 上传包含 `SKILL.md` 的 zip |
+| PUT | `/api/v1/skills/{name}/toggle` | 启用或禁用 Skill |
+| DELETE | `/api/v1/skills/{name}` | 删除数据库记录和 Skill 目录 |
+
+这里的 `app/skills` 是应用运行时提供给 Agent 的业务 Skills，不是 Codex 用户级
+`~/.agents/skills`。
 
 ## 项目结构
 
-```
+```text
 apis-agent/
-├── pyproject.toml
-├── .env.example
-│
-├── app/
-│   ├── main.py                     # Uvicorn 启动入口
-│   │
-│   ├── api/                        # HTTP 传输层
-│   │   ├── main.py                 # FastAPI app + lifespan + 中间件
-│   │   └── routes/
-│   │       ├── agent.py            # 统一对话入口 + 任务/反馈/网关
-│   │       ├── session.py          # 会话 CRUD
-│   │       ├── file.py             # 文件 CRUD
-│   │       ├── auth_routes.py      # 注册/登录/同步
-│   │       ├── skill_routes.py     # Skills 管理
-│   │       └── middleware/
-│   │           └── rate_limit.py   # 滑动窗口限流
-│   │
-│   ├── agent/                      # Agent 编排层
-│   │   ├── agent_factory.py        # create_triage_agent / create_executor_agent
-│   │   └── executor_agent.py       # ExecutorAgent (后台任务执行)
-│   │
-│   ├── subagents/                  # SubAgent 声明式定义 (AGENT.md)
-│   │   ├── ppt/
-│   │   ├── research/
-│   │   ├── file_analysis/
-│   │   ├── data_analysis/
-│   │   ├── code_review/
-│   │   └── coding/
-│   │
-│   ├── gateway/                    # 模型网关
-│   │   ├── model_gateway.py        # 注册/路由/熔断/探活/热切换
-│   │   ├── middleware.py           # GatewayModelWrapper
-│   │   ├── circuit_breaker.py      # 三态熔断器
-│   │   ├── health_probe.py         # 后台健康探活
-│   │   └── types.py                # CircuitState / HealthRecord / ModelRole
-│   │
-│   ├── harness/                    # 子代理编排
-│   │   ├── task_executor.py        # 后台任务执行引擎
-│   │   ├── task_context.py         # ChatContext / TaskSnapshot / Journal / Store
-│   │   ├── event_bus.py            # EventBus (Redis Pub/Sub + 内存降级)
-│   │   ├── dead_letter.py          # DeadLetterQueue
-│   │   ├── subagent_discovery.py   # AGENT.md 扫描解析
-│   │   ├── subagent_hot_reloader.py # SubAgent 热加载
-│   │   └── tool_hot_reloader.py    # 工具热加载
-│   │
-│   ├── prompt/                     # System Prompts
-│   │   ├── triage_prompt.py        # Triage prompt + 能力前缀
-│   │   └── executor_prompt.py      # Executor prompt
-│   │
-│   ├── rag/                        # RAG 检索
-│   │   ├── retrieval_pipeline.py
-│   │   └── graph_rag.py            # 知识图谱增强
-│   │
-│   ├── tool/                       # LangChain Agent 工具
-│   │   ├── registry.py             # TOOL_REGISTRY + @register_tool
-│   │   ├── tavily_search.py
-│   │   ├── bash_tool.py
-│   │   ├── file_system_tools.py
-│   │   ├── grep_tool.py
-│   │   ├── skills_tool.py
-│   │   ├── task_tools.py           # create_background_task / get_task_status
-│   │   ├── approval_tools.py       # request_approval / read_task_journal
-│   │   └── tool_search.py          # tool_search 元工具
-│   │
-│   ├── service/                    # 业务服务
-│   │   ├── session_service.py
-│   │   ├── file_service.py
-│   │   ├── rag_service.py
-│   │   └── embedding_service.py
-│   │
-│   ├── storage/                    # 数据访问层
-│   │   ├── db.py                   # PostgreSQL 连接 (SQLAlchemy)
-│   │   ├── base.py                 # BaseRepository[M] 泛型 CRUD
-│   │   ├── vector_store.py         # Milvus 向量存储
-│   │   └── models/
-│   │       ├── ai_session.py
-│   │       ├── ai_file_info.py
-│   │       └── ai_ppt_inst.py
-│   │
-│   ├── stores/                     # 存储管理器
-│   │   ├── pg_store.py             # PG checkpointer + store
-│   │   └── neo4j_manager.py        # Neo4j 连接管理
-│   │
-│   ├── memory/                     # 记忆系统
-│   │   └── semantic_memory.py      # 语义长期记忆 (PgVector)
-│   │
-│   ├── skill/                      # Skills 管理
-│   │   └── skill_manager.py        # DB 生命周期 + zip 上传
-│   │
-│   ├── common/                     # 通用组件
-│   │   ├── llm.py
-│   │   ├── streaming.py
-│   │   ├── exceptions.py
-│   │   ├── response.py
-│   │   ├── redis.py
-│   │   ├── logger.py
-│   │   ├── trace_context.py
-│   │   └── langfuse_client.py
-│   │
-│   ├── readers/                    # 文档解析
-│   │   └── mineru_reader.py        # MinerU PDF 解析
-│   │
-│   ├── evaluation/                 # 评估
-│   │   ├── online_eval.py          # 在线评估
-│   │   └── offline_eval_rag.py
-│   │
-│   ├── auth.py                     # JWT + 匿名用户识别
-│   ├── config/settings.py
-│   ├── utils/
-│   └── static/                     # 前端 SPA
-│
-├── sql/
-│   └── apis_agent_pg.sql           # PostgreSQL DDL
-│
-└── tests/
+|-- pyproject.toml                  # 项目元数据、运行和开发依赖
+|-- .env.example                   # 环境变量模板
+|-- sql/
+|   `-- apis_agent_pg.sql          # PostgreSQL 业务表 DDL
+|-- app/
+|   |-- main.py                    # 正式启动入口和基础设施预检
+|   |-- api/
+|   |   |-- main.py                # FastAPI app、lifespan、中间件和路由装配
+|   |   |-- middleware/
+|   |   |   `-- rate_limit.py      # Redis/内存滑动窗口限流
+|   |   `-- routes/
+|   |       |-- agent.py           # Chat、任务、PPT、反馈和网关接口
+|   |       |-- session.py         # 会话接口
+|   |       |-- file.py            # 文件接口和处理进度
+|   |       |-- auth_routes.py     # 注册、登录和匿名数据迁移
+|   |       `-- skill_routes.py    # 运行时 Skills 管理
+|   |-- agent/
+|   |   |-- agent_factory.py       # Triage/Executor 统一 DeepAgent 工厂
+|   |   `-- executor_agent.py      # 后台执行和 checkpoint resume 适配
+|   |-- subagents/                 # 6 个声明式 Specialist AGENT.md
+|   |-- prompt/                    # Triage/Executor system prompts
+|   |-- tool/
+|   |   |-- registry.py            # TOOL_REGISTRY 和冲突检测
+|   |   |-- task_tools.py          # 后台任务创建和查询
+|   |   |-- approval_tools.py      # HITL 审批和 Journal 工具
+|   |   `-- ...                    # 搜索、文件、Shell、grep、tool_search
+|   |-- harness/
+|   |   |-- task_executor.py       # 任务状态机和生命周期
+|   |   |-- task_context.py        # ChatContext、快照、Journal、PG/内存仓储
+|   |   |-- event_bus.py           # Redis Pub/Sub 与内存事件总线
+|   |   |-- dead_letter.py         # PG 优先、内存兜底的失败操作重试
+|   |   |-- tool_hot_reloader.py   # 工具热加载
+|   |   `-- subagent_hot_reloader.py
+|   |-- gateway/
+|   |   |-- model_gateway.py       # 模型链、健康指标和热切换
+|   |   |-- middleware.py          # 动态 GatewayModelWrapper
+|   |   |-- circuit_breaker.py     # 三态熔断器
+|   |   |-- health_probe.py        # 周期探活
+|   |   `-- status_events.py       # SSE 降级状态桥接
+|   |-- service/                   # 会话、文件、Embedding、RAG 业务服务
+|   |-- storage/
+|   |   |-- db.py                  # SQLAlchemy PostgreSQL 业务连接
+|   |   |-- base.py                # 通用 Repository
+|   |   |-- vector_store.py        # Milvus file_chunks
+|   |   `-- models/                # session/file/ppt ORM 模型
+|   |-- stores/
+|   |   |-- pg_store.py            # LangGraph PG checkpointer/store
+|   |   `-- neo4j_manager.py       # 可选 Neo4j 连接
+|   |-- rag/                       # 向量检索管线和 GraphRAG 基础组件
+|   |-- document/                  # 文档状态和进度事件
+|   |-- readers/                   # MinerU 等文档解析器
+|   |-- memory/                    # 跨会话语义记忆
+|   |-- context/                   # token 统计和上下文压缩工具
+|   |-- skill/                     # SkillManager
+|   |-- skills/                    # 应用运行时 SKILL.md
+|   |-- evaluation/                # 在线/离线 Agent 和 RAG 评估
+|   |-- common/                    # LLM、Redis、日志、异常、SSE、Langfuse
+|   |-- config/settings.py         # Pydantic Settings
+|   |-- auth.py                    # 匿名身份和 JWT
+|   |-- utils/                     # 文件解析、分块、图片识别等工具
+|   `-- static/                    # 由 FastAPI 托管的前端静态资源
+`-- tests/                         # 95 项单元/API/可靠性测试
 ```
 
-## 开发指南
+## 扩展开发
 
-### 运行测试
+### 新增 Specialist
 
-```bash
-pytest tests/ -v
-```
-
-### 新增 Specialist 子代理
-
-在 `app/subagents/<name>/` 下创建 `AGENT.md`——无需写代码，系统自动发现：
+在 `app/subagents/<directory>/AGENT.md` 创建定义：
 
 ```markdown
 ---
 name: my_specialist
-description: 专门处理某类任务的子代理
-allowed_tools: [tavily_search, read_file]
+description: 专门处理某类任务的领域代理
+allowed_tools: tavily_search, read_file
 ---
 
 # 工作流程
-1. 分析任务需求
-2. 逐步执行
-3. 汇报结果
 
-## 约束
-- 中文输出
+1. 分析任务。
+2. 调用获准工具执行。
+3. 返回可复核结果。
 ```
+
+`allowed_tools` 使用逗号分隔名称，不要使用 YAML 数组语法。保存后
+`SubAgentHotReloader` 会触发 Triage/Executor 重建。
 
 ### 新增 Tool
 
-在 `app/tool/` 下创建文件，使用 `@register_tool` + `@tool` 双装饰器：
+在 `app/tool/` 创建 Python 模块：
 
 ```python
 from langchain_core.tools import tool
+
 from app.tool.registry import register_tool
+
 
 @register_tool
 @tool
 async def my_search(query: str) -> str:
-    """搜索互联网获取信息。"""
     return f"搜索结果: {query}"
 ```
 
-热加载自动生效，无需重启。
+模块会在 `app.tool` 初始化时自动发现。运行中修改文件后，ToolHotReloader 会更新
+注册表并重建 Agent；跨模块工具重名会被拒绝。
 
-## 关键设计决策
+### 新增运行时 Skill
 
-- **启动时单例 Agent** — Triage/Executor DeepAgent 在 lifespan 中创建，存 `app.state`，请求直接复用，不每次 new
-- **deepagents 原生 SubAgent** — 通过 `SubAgentMiddleware` 注入，LLM 调用 `task` 工具时框架原生 spawn 独立子代理
-- **LLM 自路由** — 不依赖规则引擎或外部分类器，LLM 通过 Function Calling 自主判断分流
-- **能力前缀** — 前端拼接 `生成ppt:` / `深度研究:` 等前缀传入，后端注入对应 Specialist 的 system_prompt
-- **PG 双表体系** — 业务表 (agentx_session/file/ppt_inst) + LangGraph 框架表 (checkpointer/store)
-- **热加载原子替换** — 工具/Specialist 变更时重建 Agent，`app.state.agent = new`，进行中请求不受影响
-- **多层降级容错** — PostgreSQL/Redis/MinIO/Milvus/Neo4j 不可用时自动降级
-- **可选认证** — 匿名可用（X-Anonymous-Id），登录后 JWT 认证 + 匿名会话迁移
+在 `app/skills/<name>/SKILL.md` 创建带 `name` 和 `description` 的 frontmatter。
+SkillManager 支持把文件系统定义同步到 `agentx_skill`，上传 zip 后也会立即触发同步。
+当前实现没有独立的周期同步任务。
+
+### 测试
+
+```bash
+pytest -q
+```
+
+当前测试集共收集 95 项，覆盖聊天主链路、用户隔离、Repository、文件解析、模型
+降级、语义记忆、Journal、DeadLetter、任务持久化、HITL 恢复、上下文工具等行为。
+
+离线评估入口：
+
+```bash
+python -m app.evaluation.offline_eval_agent
+python -m app.evaluation.offline_eval_rag
+```
+
+## 当前边界
+
+- `GraphRAGService` 已实现，但尚未接入默认 RAG 主链路。
+- 上下文压缩工具已存在，但尚未注入当前 DeepAgent 中间件链。
+- 任务重启只支持恢复 `waiting_human`；运行中的任务会标记取消。
+- Milvus 当前使用共享 `file_chunks` Collection，并按文件 ID 做逻辑过滤，不是物理多租户隔离。
+- 业务 Repository 使用同步 SQLAlchemy；耗时向量化已通过线程池避免阻塞，但业务数据库访问仍是同步调用。
+- Skills 管理和网关管理接口尚无独立管理员鉴权。
+- 当前密码哈希是轻量 SHA-256 方案，生产部署应迁移到 Argon2id 等密码哈希算法。
 
 ## License
 
