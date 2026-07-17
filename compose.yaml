@@ -1,31 +1,6 @@
 name: apis-agent
 
 services:
-  app:
-    build: .
-    env_file: .env
-    environment:
-      APP_ENV: development
-      DATA_DIR: /var/lib/apis-agent
-      PG_HOST: postgres
-      REDIS_HOST: redis
-      MINIO_HOST: minio
-      MILVUS_HOST: milvus
-      NEO4J_URI: bolt://neo4j:7687
-    ports:
-      - "8080:8080"
-    volumes:
-      - app-data:/var/lib/apis-agent
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      milvus:
-        condition: service_healthy
-
   postgres:
     image: postgres:16-alpine
     environment:
@@ -115,7 +90,6 @@ services:
       - neo4j-data:/data
 
 volumes:
-  app-data:
   postgres-data:
   redis-data:
   minio-data:

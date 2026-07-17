@@ -7,10 +7,6 @@ Executor 驱动长周期后台任务，Specialist 通过声明式 `AGENT.md` 提
 当前仓库同时包含后端 API、轻量前端、任务可靠性组件、文档 RAG、Skills 管理和
 在线/离线评估工具，是一个单体部署、模块化组织的 Python 应用。
 
-架构边界、实施记录和验收结果见
-[架构优化实施计划](docs/architecture-optimization-plan.md)，目录放置规则见
-[项目结构蓝图](docs/project-structure-blueprint.md)。
-
 ## 核心能力
 
 - **三层 Agent 协作**：Triage DeepAgent -> Executor DeepAgent -> Specialist SubAgent
@@ -225,7 +221,10 @@ Neo4j 连接。
 ### 1. 安装
 
 ```bash
-uv sync --frozen --extra dev
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 ```
 
 ### 2. 配置
@@ -264,17 +263,15 @@ TAVILY_API_KEY=tvly-your-tavily-key-here
 ### 3. 初始化业务表
 
 ```bash
-uv run alembic upgrade head
+psql -h 127.0.0.1 -U postgres -d apis_agent -f sql/apis_agent_pg.sql
 ```
 
-已有 `sql/apis_agent_pg.sql` 数据库完成结构核对后，执行
-`uv run alembic stamp 0001` 纳入迁移版本，再执行 `uv run alembic upgrade head`。
 LangGraph 表仍由框架 setup 创建。
 
 ### 4. 启动
 
 ```bash
-uv run python -m app.main
+python -m app.main
 ```
 
 - 前端：<http://localhost:8080/>
@@ -283,14 +280,11 @@ uv run python -m app.main
 - Liveness：<http://localhost:8080/health/live>
 - Readiness：<http://localhost:8080/health/ready>
 
-完整本地基础设施可直接启动：
+如需本地依赖服务，可通过 Docker Compose 启动：
 
 ```bash
-docker compose up --build
+docker compose up -d postgres redis minio milvus
 ```
-
-生产覆盖示例位于 `deploy/compose.production.yaml`，敏感配置模板位于
-`deploy/.env.production.example`。
 
 ## API
 
@@ -364,13 +358,8 @@ docker compose up --build
 ```text
 apis-agent/
 |-- pyproject.toml                  # 项目元数据、运行和开发依赖
-|-- uv.lock                         # 跨环境依赖锁定
 |-- .env.example                   # 环境变量模板
-|-- Dockerfile                     # 只读生产镜像
-|-- compose.yaml                   # 完整本地基础设施
-|-- migrations/                    # Alembic schema 版本
-|-- deploy/                        # 入口脚本和生产覆盖示例
-|-- docs/adr/                      # 架构决策记录
+|-- compose.yaml                   # 本地依赖服务
 |-- app/
 |   |-- main.py                    # 正式启动入口和基础设施预检
 |   |-- api/
@@ -494,21 +483,19 @@ frontmatter；它随镜像发布并保持只读。用户上传的 zip 写入
 ### 测试
 
 ```bash
-uv run pytest -m unit
-uv run pytest -m contract
-uv run pytest -m integration       # 需要先执行 Alembic 并启动 PostgreSQL
+pytest -m unit
+pytest -m contract
+pytest -m integration       # 需要先导入 sql/apis_agent_pg.sql 并启动 PostgreSQL
 ```
 
 当前测试集共收集 115 项：无外部依赖的 unit + contract 共 106 项，PostgreSQL
-integration 共 9 项。最终本地回归为 115 项全部通过；CI 会创建独立 PostgreSQL、
-执行 Alembic 后分别运行两组测试。
+integration 共 9 项。最终本地回归为 115 项全部通过。
 
-质量与迁移检查：
+质量检查：
 
 ```bash
-uv run ruff check app tests migrations
-uv run mypy app/config app/bootstrap app/infrastructure/reliability.py app/modules/identity
-uv run alembic upgrade head --sql
+ruff check app tests
+mypy app/config app/bootstrap app/infrastructure/reliability.py app/modules/identity
 ```
 
 离线评估入口：
