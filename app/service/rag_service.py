@@ -1,7 +1,7 @@
 import logging
 
 from app.common.langfuse_client import observe
-from app.rag.retrieval_pipeline import build_context_enhanced
+from app.modules.documents.retrieval import build_context_enhanced
 from app.service.embedding_service import embed_query, embedding_available
 from app.storage.vector_store import vector_store
 

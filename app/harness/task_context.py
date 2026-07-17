@@ -52,11 +52,6 @@ class TaskContextManager:
             yield context
         finally:
             self.reset(token)
-
-
-task_context_manager = TaskContextManager()
-
-
 class TaskStatus(str, Enum):
     CREATED = "created"
     PENDING = "pending"
@@ -396,6 +391,3 @@ class PgTaskStore:
             key = getattr(item, "key", "")
             if key:
                 await self._store.adelete(JOURNAL_NAMESPACE + (task_id,), key)
-
-
-task_store: TaskStore = MemoryTaskStore()

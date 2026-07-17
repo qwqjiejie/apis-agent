@@ -1,1 +1,1 @@
-from app.rag.retrieval_pipeline import RetrievalPipeline  # noqa: F401
+from app.modules.documents.retrieval import RetrievalPipeline  # noqa: F401

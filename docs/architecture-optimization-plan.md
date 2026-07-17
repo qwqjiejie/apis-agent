@@ -91,34 +91,34 @@ Infrastructure Adapters
 
 ### 阶段 1：建立组合根与唯一运行时容器（P0）
 
-状态：**实施中**
+状态：**已完成**
 
 - [x] 新增 `app/bootstrap` 和 `ApplicationContainer`。
 - [x] 由 FastAPI lifespan 创建并注册唯一容器。
 - [x] Agent、RAG、网关管理接口共享同一 `ModelGateway`。
 - [x] Agent API 从容器读取 Agent、任务执行器和长期记忆。
-- [ ] 工具和 Executor 包装器停止导入模块级 `task_executor`。
-- [ ] DeadLetter、EventBus、SemanticMemory 改为构造器注入并移除兼容单例。
-- [ ] FileService 和 VectorStore 移除导入期连接行为。
+- [x] 工具和 Executor 包装器停止导入模块级 `task_executor`。
+- [x] DeadLetter、EventBus、SemanticMemory 改为构造器注入并移除兼容单例。
+- [x] FileService 和 VectorStore 移除导入期连接行为。
 
 验收标准：管理接口返回的活跃模型、健康统计和熔断状态与 Agent 实际调用实例一致；重复创建测试应用不会复用上一实例。
 
 ### 阶段 2：拆分 API 路由与应用用例（P0）
 
-状态：未开始
+状态：**已完成**
 
-- [ ] 将 `agent.py` 拆为 `chat_routes.py`、`task_routes.py`、`gateway_routes.py`、`feedback_routes.py` 和 `artifact_routes.py`。
-- [ ] 把会话保存、标题生成、任务查询等逻辑下沉到应用服务。
-- [ ] 统一认证依赖和用户资源归属校验。
-- [ ] 为 SSE 事件定义稳定 schema，并补充契约测试。
+- [x] 将 `agent.py` 拆为 `chat_routes.py`、`task_routes.py`、`gateway_routes.py`、`feedback_routes.py` 和 `artifact_routes.py`。
+- [x] 把会话保存、标题生成、任务查询等逻辑下沉到应用服务。
+- [x] 统一认证依赖和用户资源归属校验。
+- [x] 为 SSE 事件定义稳定 schema，并补充契约测试。
 
 验收标准：路由函数只包含请求校验、权限、用例调用和响应映射；单个路由模块不超过约 250 行。
 
 ### 阶段 3：按业务能力收拢模块（P1）
 
-状态：未开始
+状态：**实施中**
 
-- [ ] 先收拢 `documents`：上传、解析、状态、索引和检索形成完整用例边界。
+- [x] 先收拢 `documents`：上传、解析、状态、索引和检索形成完整用例边界。
 - [ ] 收拢 `tasks`：快照、Journal、审批、恢复和事件发布归属同一模块。
 - [ ] 收拢 `chat`、`identity`、`skills`，明确公共端口。
 - [ ] 删除空目录和不再使用的兼容实现。
@@ -176,3 +176,11 @@ Infrastructure Adapters
 | 2026-07-17 | 启动阶段 1：组合根与唯一运行时容器 | 首批改造完成，阶段继续实施 |
 | 2026-07-17 | 容器、聊天、任务和网关定向回归 | 18 项通过 |
 | 2026-07-17 | 全量测试 | 92 项通过；5 项因当前环境禁止连接本机 PostgreSQL 而未通过 |
+| 2026-07-17 | 移除任务运行时模块级单例，改为构造器注入 | 完成 |
+| 2026-07-17 | FileService / VectorStore 导入副作用治理 | 完成，阶段 1 收口 |
+| 2026-07-17 | 阶段 1 全量回归 | 95 项通过；5 项仍受 PostgreSQL 沙箱连接限制 |
+| 2026-07-17 | 阶段 2：按职责拆分 Agent API 路由 | 完成首批，`agent.py` 从 412 行降至 80 行 |
+| 2026-07-17 | 对话持久化和标题生成下沉 `chat_service` | 完成 |
+| 2026-07-17 | 统一会话资源归属检查和 SSE 契约 | 完成，阶段 2 收口 |
+| 2026-07-17 | 阶段 3：收拢 documents 业务模块 | 完成，旧路径保留兼容导出 |
+| 2026-07-17 | documents 模块全量回归 | 98 项通过；5 项仍受 PostgreSQL 沙箱连接限制 |

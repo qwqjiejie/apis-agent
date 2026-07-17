@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock
 
+from app.api import dependencies as api_dependencies
 from app.api.routes import file as file_routes
 from app.api.routes import session as session_routes
 from app.auth import generate_token
@@ -75,7 +76,7 @@ def test_v7_file_upload_rejects_foreign_conversation(monkeypatch):
     upload = AsyncMock(return_value={"fileId": "never"})
     monkeypatch.setattr(file_routes.file_service, "upload", upload)
     monkeypatch.setattr(
-        file_routes.store,
+        api_dependencies.store,
         "get_session_owner",
         lambda session_id: "user_a",
     )

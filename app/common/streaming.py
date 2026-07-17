@@ -27,6 +27,7 @@ class StreamEventType(StrEnum):
     # 错误/状态
     ERROR = "error"
     STATUS = "status"
+    TASK_STATUS = "task_status"
 
     # 深度研究阶段
     PHASE_START = "phase_start"

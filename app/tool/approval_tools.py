@@ -4,8 +4,8 @@ import logging
 
 from langchain_core.tools import tool
 
+from app.bootstrap.container import get_application_container
 from app.tool.registry import register_tool
-from app.harness.task_context import task_context_manager
 
 logger = logging.getLogger("apis")
 
@@ -33,15 +33,16 @@ async def read_task_journal(task_id: str = "") -> str:
     Args:
         task_id: 任务编号。不传则读取当前任务。
     """
-    from app.harness.task_executor import task_executor
-
-    resolved_task_id = task_id or task_context_manager.get().task_id
+    runtime = get_application_container()
+    task_executor = runtime.task_executor
+    context = runtime.context_manager.get()
+    resolved_task_id = task_id or context.task_id
     if not resolved_task_id:
         return "当前没有可读取的任务上下文"
 
     entries = await task_executor.read_journal(
         resolved_task_id,
-        user_id=task_context_manager.get().user_id,
+        user_id=context.user_id,
     )
     logger.info(f"[Journal] 读取日志: {resolved_task_id}, entries={len(entries)}")
     if not entries:

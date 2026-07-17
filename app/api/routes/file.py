@@ -5,12 +5,12 @@ from fastapi import APIRouter, UploadFile, File, Form, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from app.document.document_event_bus import event_bus
-from app.service.file_service import file_service
+from app.api.dependencies import inspect_session_access
+from app.modules.documents.events import event_bus
+from app.modules.documents.service import file_service
 from app.common.response import ok, ok_paged, error
 from app.common.streaming import make_sse
 from app.auth import get_current_user_id
-from app.service.session_service import store
 
 router = APIRouter(prefix="/file", tags=["file"])
 
@@ -41,7 +41,7 @@ async def file_upload(
         conversationId: str = Form(default=""),
 ):
     user_id = get_current_user_id(request)
-    if conversationId and store.get_session_owner(conversationId) != user_id:
+    if conversationId and not inspect_session_access(request, conversationId).allowed:
         return error(403, "无权访问该会话")
     result = await file_service.upload(file, conversationId, user_id=user_id)
     return ok(result)

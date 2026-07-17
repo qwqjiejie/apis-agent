@@ -3,6 +3,7 @@ import secrets
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from app.api.dependencies import inspect_session_access
 from app.service.session_service import store
 from app.common.response import ok, ok_paged, error
 from app.auth import get_current_user_id
@@ -45,17 +46,17 @@ async def get_session(req: SessionDetailRequest, request: Request):
     session = store.get_session(req.conversationId)
     if not session:
         return error(404, "会话不存在")
-    if store.get_session_owner(req.conversationId) != get_current_user_id(request):
+    if not inspect_session_access(request, req.conversationId).allowed:
         return error(403, "无权访问该会话")
     return ok(session)
 
 
 @router.post("/delete")
 async def delete_session(req: SessionDeleteRequest, request: Request):
-    owner = store.get_session_owner(req.conversationId)
-    if owner is None:
+    access = inspect_session_access(request, req.conversationId)
+    if not access.exists:
         return error(404, "会话不存在")
-    if owner != get_current_user_id(request):
+    if not access.allowed:
         return error(403, "无权访问该会话")
     ok_deleted = store.delete_session(req.conversationId)
     if not ok_deleted:

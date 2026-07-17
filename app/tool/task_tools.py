@@ -7,7 +7,7 @@ import logging
 
 from langchain_core.tools import tool
 
-from app.harness.task_context import task_context_manager
+from app.bootstrap.container import get_application_container
 from app.tool.registry import register_tool
 
 logger = logging.getLogger("apis")
@@ -24,19 +24,26 @@ async def create_background_task(goal: str, plan: str = "") -> str:
         goal: 任务目标（一句话描述）
         plan: 简要执行计划（可选）
     """
-    from app.harness.task_executor import task_executor
+    runtime = get_application_container()
+    task_executor = runtime.task_executor
+    context_manager = runtime.context_manager
 
     query = goal
     if plan:
         query = f"{goal}\n\n执行计划: {plan}"
 
     # 提交后台任务
-    context = task_context_manager.get()
+    context = context_manager.get()
     conv = context.session_id or "bg"
 
     async def _execute(snapshot):
         from app.agent.executor_agent import ExecutorAgent
-        executor = ExecutorAgent(snapshot, plan)
+        executor = ExecutorAgent(
+            snapshot,
+            plan,
+            executor_agent=runtime.executor_agent,
+            context_manager=context_manager,
+        )
         async for event in executor.run():
             yield event
 
@@ -57,9 +64,9 @@ async def get_task_status(task_id: str = "") -> str:
     Args:
         task_id: 任务编号。不传则列出当前会话所有任务概览。
     """
-    from app.harness.task_executor import task_executor
-
-    user_id = task_context_manager.get().user_id
+    runtime = get_application_container()
+    task_executor = runtime.task_executor
+    user_id = runtime.context_manager.get().user_id
 
     if task_id:
         status = await task_executor.get_status(task_id, user_id=user_id)

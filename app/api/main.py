@@ -131,6 +131,18 @@ async def lifespan(app: FastAPI):
             logger.warning(f"[main] MinIO 不可用: {e}")
     container.minio_client = app.state.minio_client
 
+    # ── 3. 文档基础设施 ────────────────────────────────
+    from app.modules.documents.service import file_service
+    from app.storage.vector_store import vector_store
+
+    vector_store.connect()
+    file_service.configure(
+        minio_client=container.minio_client,
+        db_available=True,
+    )
+    container.vector_store = vector_store
+    container.file_service = file_service
+
     # ── 3. SubAgent 发现 ────────────────────────────
     from app.agent.agent_factory import _build_subagents_from_specialists
     subagents = _build_subagents_from_specialists()
@@ -159,34 +171,48 @@ async def lifespan(app: FastAPI):
     app.state.executor_agent = container.executor_agent
     logger.info("[main] Executor DeepAgent 创建完成")
 
-    # ── 6. TaskExecutor（注入 executor_agent）────────
-    from app.harness.task_executor import task_executor
+    # ── 6. 任务运行时依赖 ────────────────────────────
+    from app.harness.dead_letter import DeadLetterQueue
+    from app.harness.event_bus import EventBus
     from app.harness.task_context import (
         MemoryTaskStore,
         PgTaskStore,
+        TaskContextManager,
         TaskSnapshot,
-        task_context_manager,
     )
+    from app.harness.task_executor import TaskExecutor
+    from app.memory.semantic_memory import SemanticMemoryStore
+
     if container.store is not None:
         task_repository = PgTaskStore(container.store)
         logger.info("[main] TaskExecutor 使用 PostgreSQL 持久化仓储")
     else:
         task_repository = MemoryTaskStore()
         logger.warning("[main] PG Store 不可用，TaskExecutor 降级为内存仓储")
-    task_executor.configure(
+
+    event_bus = EventBus()
+    dead_letter_queue = DeadLetterQueue(container.store)
+    semantic_memory = SemanticMemoryStore()
+    semantic_memory.configure(container.store)
+    task_context_manager = TaskContextManager()
+    task_executor = TaskExecutor(
         store=task_repository,
+        event_bus_instance=event_bus,
+        context_manager_instance=task_context_manager,
+        dead_letter_queue_instance=dead_letter_queue,
         executor_agent=container.executor_agent,
     )
+
     container.task_executor = task_executor
     container.context_manager = task_context_manager
+    container.dead_letter_queue = dead_letter_queue
+    container.semantic_memory = semantic_memory
+    container.event_bus = event_bus
     app.state.task_executor = task_executor
     app.state.context_manager = task_context_manager
+    app.state.event_bus = event_bus
 
     # 关键持久化失败通过 PG DeadLetter 重试；PG 不可用时队列自动退回内存。
-    from app.harness.dead_letter import dead_letter_queue
-    dead_letter_queue.configure(container.store)
-    container.dead_letter_queue = dead_letter_queue
-
     async def _retry_snapshot(args):
         await task_repository.save(TaskSnapshot.from_dict(args["snapshot"]))
 
@@ -200,10 +226,6 @@ async def lifespan(app: FastAPI):
 
     dead_letter_queue.register_retry_handler("task_snapshot_save", _retry_snapshot)
     dead_letter_queue.register_retry_handler("task_journal_append", _retry_journal)
-
-    from app.memory.semantic_memory import semantic_memory
-    semantic_memory.configure(container.store)
-    container.semantic_memory = semantic_memory
 
     # ── 7. SkillManager ─────────────────────────────
     from app.skill.skill_manager import skill_manager
@@ -221,10 +243,7 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Neo4j 初始化跳过: {e}")
 
     # ── 9. 事件总线 ─────────────────────────────────
-    from app.harness.event_bus import event_bus
     from app.common.redis import get_redis
-    container.event_bus = event_bus
-    app.state.event_bus = event_bus  # 与 task_executor 引用的同一单例
     try:
         redis_client = await get_redis()
         event_bus.set_redis(redis_client)
@@ -264,6 +283,7 @@ async def lifespan(app: FastAPI):
     await sa_reloader.stop()
     await dead_letter_queue.stop_scanner()
     await gateway.stop_probe()
+    vector_store.close()
     if pg_store_manager.available:
         await pg_store_manager.close()
     if neo4j_manager.available:

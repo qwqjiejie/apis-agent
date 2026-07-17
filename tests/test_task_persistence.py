@@ -15,16 +15,19 @@ from langgraph.types import interrupt
 
 from app.agent.executor_agent import ExecutorAgent, _build_resume_command
 from app.api.routes import agent as agent_routes
-from app.bootstrap.container import ApplicationContainer
+from app.api.routes import chat_routes
+from app.bootstrap.container import (
+    ApplicationContainer,
+    clear_application_container,
+    set_application_container,
+)
 from app.gateway.model_gateway import ModelGateway
 from app.harness.event_bus import EventBus
 from app.harness.task_context import (
     PgTaskStore,
     TaskSnapshot,
     TaskStatus,
-    task_context_manager,
 )
-from app.harness import task_executor as task_executor_module
 from app.harness.task_executor import TaskExecutor
 from app.tool.task_tools import create_background_task
 
@@ -90,13 +93,16 @@ def _attach_runtime(test_app: FastAPI, executor: TaskExecutor, agent=None):
         add=AsyncMock(),
         build_context_injection=lambda _memories: "",
     )
-    test_app.state.container = ApplicationContainer(
+    runtime = ApplicationContainer(
         model_gateway=ModelGateway(),
         agent=agent,
+        executor_agent=executor.executor_agent,
         task_executor=executor,
-        context_manager=task_context_manager,
+        context_manager=executor.context_manager,
         semantic_memory=memory,
     )
+    test_app.state.container = runtime
+    return runtime
 
 
 @pytest.mark.asyncio
@@ -194,10 +200,13 @@ async def test_v3_langgraph_interrupt_is_persisted_as_waiting_human(monkeypatch)
     repository = PgTaskStore(backend)
     executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
     executor.executor_agent = graph
-    monkeypatch.setattr(task_executor_module, "task_executor", executor)
 
     async def execute(snapshot):
-        wrapper = ExecutorAgent(snapshot)
+        wrapper = ExecutorAgent(
+            snapshot,
+            executor_agent=graph,
+            context_manager=executor.context_manager,
+        )
         async for event in wrapper.run():
             yield event
 
@@ -258,13 +267,16 @@ async def test_v4_resume_endpoint_continues_same_checkpoint(monkeypatch):
     repository = PgTaskStore(FakeLangGraphStore())
     executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
     executor.executor_agent = graph
-    monkeypatch.setattr(task_executor_module, "task_executor", executor)
 
     test_app = FastAPI()
     _attach_runtime(test_app, executor)
 
     async def execute(snapshot):
-        wrapper = ExecutorAgent(snapshot)
+        wrapper = ExecutorAgent(
+            snapshot,
+            executor_agent=graph,
+            context_manager=executor.context_manager,
+        )
         async for event in wrapper.run():
             yield event
 
@@ -371,10 +383,13 @@ async def test_v6_waiting_task_resumes_after_executor_restart(monkeypatch):
     repository = PgTaskStore(backend)
     first_executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
     first_executor.executor_agent = graph
-    monkeypatch.setattr(task_executor_module, "task_executor", first_executor)
 
     async def execute(snapshot):
-        wrapper = ExecutorAgent(snapshot)
+        wrapper = ExecutorAgent(
+            snapshot,
+            executor_agent=graph,
+            context_manager=first_executor.context_manager,
+        )
         async for event in wrapper.run():
             yield event
 
@@ -397,7 +412,6 @@ async def test_v6_waiting_task_resumes_after_executor_restart(monkeypatch):
         event_bus_instance=EventBus(),
     )
     restarted_executor.executor_agent = graph
-    monkeypatch.setattr(task_executor_module, "task_executor", restarted_executor)
 
     assert await restarted_executor.recover_tasks() == 1
     assert not await restarted_executor.resume(
@@ -434,50 +448,57 @@ def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
     repository = PgTaskStore(FakeLangGraphStore())
     executor = TaskExecutor(store=repository, event_bus_instance=EventBus())
     executor.executor_agent = BlockingExecutorGraph()
-    monkeypatch.setattr(task_executor_module, "task_executor", executor)
 
     test_app = FastAPI()
     test_app.include_router(agent_routes.router, prefix="/api/v1")
-    _attach_runtime(test_app, executor, BackgroundTaskTriageAgent())
+    runtime = _attach_runtime(test_app, executor, BackgroundTaskTriageAgent())
+    set_application_container(runtime)
 
-    monkeypatch.setattr(agent_routes, "_save_session", lambda *args, **kwargs: None)
-    monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="研究报告"))
-    monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
-    monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
+    monkeypatch.setattr(chat_routes.chat_service, "save_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        chat_routes.chat_service,
+        "generate_title",
+        AsyncMock(return_value="研究报告"),
+    )
+    monkeypatch.setattr(chat_routes.chat_service, "update_session_title", lambda *args: None)
+    monkeypatch.setattr(chat_routes.online_eval, "record", lambda record: None)
 
-    with TestClient(test_app) as client:
-        headers = {"X-Anonymous-Id": "v2-test-user"}
-        response = client.post(
-            "/api/v1/agent/chat",
-            json={"message": "请完成一份需要多个专家协作的复杂研究报告"},
-            headers=headers,
-        )
-        match = re.search(r"task_[0-9a-f]{12}", response.text)
-        assert match is not None
-        task_id = match.group()
+    try:
+        with TestClient(test_app) as client:
+            headers = {"X-Anonymous-Id": "v2-test-user"}
+            response = client.post(
+                "/api/v1/agent/chat",
+                json={"message": "请完成一份需要多个专家协作的复杂研究报告"},
+                headers=headers,
+            )
+            match = re.search(r"task_[0-9a-f]{12}", response.text)
+            assert match is not None
+            task_id = match.group()
 
-        status_response = client.post(
-            "/api/v1/agent/task/status",
-            json={"taskId": task_id},
-            headers=headers,
-        )
-        assert status_response.json()["data"]["status"] == TaskStatus.EXECUTING.value
-
-        cancel_response = client.post(
-            "/api/v1/agent/task/cancel",
-            json={"taskId": task_id},
-            headers=headers,
-        )
-        assert cancel_response.json()["code"] == 200
-
-        for _ in range(100):
             status_response = client.post(
                 "/api/v1/agent/task/status",
                 json={"taskId": task_id},
                 headers=headers,
             )
-            if status_response.json()["data"]["status"] == TaskStatus.CANCELLED.value:
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("后台任务取消状态未持久化")
+            assert status_response.json()["data"]["status"] == TaskStatus.EXECUTING.value
+
+            cancel_response = client.post(
+                "/api/v1/agent/task/cancel",
+                json={"taskId": task_id},
+                headers=headers,
+            )
+            assert cancel_response.json()["code"] == 200
+
+            for _ in range(100):
+                status_response = client.post(
+                    "/api/v1/agent/task/status",
+                    json={"taskId": task_id},
+                    headers=headers,
+                )
+                if status_response.json()["data"]["status"] == TaskStatus.CANCELLED.value:
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("后台任务取消状态未持久化")
+    finally:
+        clear_application_container(runtime)

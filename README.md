@@ -361,7 +361,12 @@ apis-agent/
 |   |   |-- middleware/
 |   |   |   `-- rate_limit.py      # Redis/内存滑动窗口限流
 |   |   `-- routes/
-|   |       |-- agent.py           # Chat、任务、PPT、反馈和网关接口
+|   |       |-- agent.py           # Agent 子路由聚合和兼容导出
+|   |       |-- chat_routes.py     # 同步聊天和 SSE 输出
+|   |       |-- task_routes.py     # 后台任务查询、取消和恢复
+|   |       |-- gateway_routes.py  # 模型状态和热切换
+|   |       |-- artifact_routes.py # PPT、停止和 Shell 确认
+|   |       |-- feedback_routes.py # 用户反馈
 |   |       |-- session.py         # 会话接口
 |   |       |-- file.py            # 文件接口和处理进度
 |   |       |-- auth_routes.py     # 注册、登录和匿名数据迁移
@@ -370,6 +375,9 @@ apis-agent/
 |   |   |-- agent_factory.py       # Triage/Executor 统一 DeepAgent 工厂
 |   |   `-- executor_agent.py      # 后台执行和 checkpoint resume 适配
 |   |-- subagents/                 # 6 个声明式 Specialist AGENT.md
+|   |-- bootstrap/                 # ApplicationContainer 和应用依赖装配
+|   |-- modules/
+|   |   `-- documents/             # 上传、解析、分块、状态、进度和增强检索
 |   |-- prompt/                    # Triage/Executor system prompts
 |   |-- tool/
 |   |   |-- registry.py            # TOOL_REGISTRY 和冲突检测
@@ -389,7 +397,7 @@ apis-agent/
 |   |   |-- circuit_breaker.py     # 三态熔断器
 |   |   |-- health_probe.py        # 周期探活
 |   |   `-- status_events.py       # SSE 降级状态桥接
-|   |-- service/                   # 会话、文件、Embedding、RAG 业务服务
+|   |-- service/                   # 会话、聊天、反馈、Embedding 及兼容服务入口
 |   |-- storage/
 |   |   |-- db.py                  # SQLAlchemy PostgreSQL 业务连接
 |   |   |-- base.py                # 通用 Repository
@@ -398,8 +406,8 @@ apis-agent/
 |   |-- stores/
 |   |   |-- pg_store.py            # LangGraph PG checkpointer/store
 |   |   `-- neo4j_manager.py       # 可选 Neo4j 连接
-|   |-- rag/                       # 向量检索管线和 GraphRAG 基础组件
-|   |-- document/                  # 文档状态和进度事件
+|   |-- rag/                       # GraphRAG 和旧检索路径兼容层
+|   |-- document/                  # 旧文档路径兼容层
 |   |-- readers/                   # MinerU 等文档解析器
 |   |-- memory/                    # 跨会话语义记忆
 |   |-- context/                   # token 统计和上下文压缩工具
@@ -409,9 +417,9 @@ apis-agent/
 |   |-- common/                    # LLM、Redis、日志、异常、SSE、Langfuse
 |   |-- config/settings.py         # Pydantic Settings
 |   |-- auth.py                    # 匿名身份和 JWT
-|   |-- utils/                     # 文件解析、分块、图片识别等工具
+|   |-- utils/                     # 图片识别、通用工具及旧文档工具兼容层
 |   `-- static/                    # 由 FastAPI 托管的前端静态资源
-`-- tests/                         # 95 项单元/API/可靠性测试
+`-- tests/                         # 103 项单元/API/可靠性测试
 ```
 
 ## 扩展开发

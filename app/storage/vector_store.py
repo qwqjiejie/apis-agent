@@ -22,10 +22,13 @@ class VectorStore:
         self._client: MilvusClient | None = None
         self._ready = False
         self._connect_error: str | None = None
-        if get_settings().milvus_host:
-            self._connect()
 
-    def _connect(self):
+    def connect(self) -> bool:
+        """显式连接 Milvus；对象构造和模块导入阶段不访问外部服务。"""
+        if self._ready:
+            return True
+        if not get_settings().milvus_host:
+            return False
         try:
             uri = f"http://{get_settings().milvus_host}:{get_settings().milvus_port}"
             token = f"{get_settings().milvus_user}:{get_settings().milvus_pass}" if get_settings().milvus_user else None
@@ -40,17 +43,20 @@ class VectorStore:
                 self._client.use_database(db_name)
             self._ensure_collection()
             self._ready = True
+            self._connect_error = None
             logger.info(f"Milvus 连接成功: {uri}, db={db_name}")
         except Exception as e:
             self._connect_error = str(e)
             self._client = None
             self._ready = False
+            logger.warning(f"Milvus 连接失败: {e}")
+        return self._ready
 
     def check_milvus(self):
         """启动时强制检查 Milvus 连接，失败则抛出 MilvusError。"""
         if not get_settings().milvus_host:
             return
-        if not self._ready:
+        if not self.connect():
             from app.common.exceptions import MilvusError
             raise MilvusError(f"Milvus 连接失败: {self._connect_error}")
 
@@ -138,6 +144,8 @@ class VectorStore:
                 self._client.close()
             except Exception:
                 pass
+        self._client = None
+        self._ready = False
 
 
 vector_store = VectorStore()

@@ -17,14 +17,15 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from app.harness.dead_letter import DeadLetterQueue
+from app.harness.event_bus import EventBus
 from app.harness.task_context import (
+    MemoryTaskStore,
+    TaskContextManager,
     TaskSnapshot,
     TaskStatus,
     TaskStore,
-    task_context_manager,
-    task_store,
 )
-from app.harness.event_bus import event_bus
 
 logger = logging.getLogger("apis")
 
@@ -44,18 +45,49 @@ class ApprovalNotHandledError(Exception):
 class TaskExecutor:
     """后台任务执行引擎。"""
 
-    def __init__(self, store: TaskStore | None = None, event_bus_instance=None):
-        self._store = store or task_store
-        self._event_bus = event_bus_instance or event_bus
-        self.executor_agent = None
+    def __init__(
+        self,
+        store: TaskStore | None = None,
+        event_bus_instance: EventBus | None = None,
+        context_manager_instance: TaskContextManager | None = None,
+        dead_letter_queue_instance: DeadLetterQueue | None = None,
+        executor_agent=None,
+    ):
+        self._store = store if store is not None else MemoryTaskStore()
+        self._event_bus = (
+            event_bus_instance if event_bus_instance is not None else EventBus()
+        )
+        self._context_manager = (
+            context_manager_instance
+            if context_manager_instance is not None
+            else TaskContextManager()
+        )
+        self._dead_letter_queue = (
+            dead_letter_queue_instance
+            if dead_letter_queue_instance is not None
+            else DeadLetterQueue()
+        )
+        self.executor_agent = executor_agent
         self._running: dict[str, asyncio.Task] = {}
         self._live_snapshots: dict[str, TaskSnapshot] = {}
         self._draining: bool = False
         self._msg_counts: dict[str, int] = {}
         self._unhandled_approval: dict[str, int] = {}
 
+    @property
+    def context_manager(self) -> TaskContextManager:
+        return self._context_manager
+
+    @property
+    def event_bus(self) -> EventBus:
+        return self._event_bus
+
+    @property
+    def dead_letter_queue(self) -> DeadLetterQueue:
+        return self._dead_letter_queue
+
     def configure(self, *, store: TaskStore, executor_agent=None) -> None:
-        """在 lifespan 中注入持久化仓储和单例 Executor Agent。"""
+        """兼容旧调用方；新代码应在构造时注入依赖。"""
         if self._running:
             raise RuntimeError("存在运行中任务时不能替换 TaskStore")
         self._store = store
@@ -82,7 +114,7 @@ class TaskExecutor:
             query=query,
             goal=query,
             session_id=conversation_id,
-            user_id=user_id or task_context_manager.get().user_id,
+            user_id=user_id or self._context_manager.get().user_id,
             status=TaskStatus.CREATED,
         )
         await self._save_snapshot(snapshot)
@@ -146,7 +178,11 @@ class TaskExecutor:
             from app.agent.executor_agent import ExecutorAgent
 
             try:
-                wrapper = ExecutorAgent(snapshot)
+                wrapper = ExecutorAgent(
+                    snapshot,
+                    executor_agent=self.executor_agent,
+                    context_manager=self._context_manager,
+                )
                 await self._drive(snapshot, lambda: wrapper.resume(resume_data))
             finally:
                 self._forget_runtime(task_id)
@@ -447,9 +483,7 @@ class TaskExecutor:
                 f"[Journal] {task_id} | step={entry.step} | {event}: {description[:200]}"
             )
         except Exception as exc:
-            from app.harness.dead_letter import dead_letter_queue
-
-            await dead_letter_queue.enqueue(
+            await self._dead_letter_queue.enqueue(
                 "task_journal_append",
                 {
                     "task_id": task_id,
@@ -465,9 +499,7 @@ class TaskExecutor:
         try:
             await self._store.save(snapshot)
         except Exception as exc:
-            from app.harness.dead_letter import dead_letter_queue
-
-            await dead_letter_queue.enqueue(
+            await self._dead_letter_queue.enqueue(
                 "task_snapshot_save",
                 {"snapshot": snapshot.to_dict()},
                 error=str(exc),
@@ -502,6 +534,3 @@ class TaskExecutor:
             return payload if isinstance(payload, dict) else event
         except json.JSONDecodeError:
             return event
-
-
-task_executor = TaskExecutor()

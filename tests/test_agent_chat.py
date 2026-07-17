@@ -10,10 +10,11 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.api.routes import agent as agent_routes
+from app.api.routes import chat_routes
 from app.auth import generate_token
 from app.bootstrap.container import ApplicationContainer
 from app.gateway.model_gateway import ModelGateway
-from app.harness.task_context import task_context_manager
+from app.harness.task_context import TaskContextManager
 
 
 class FakeStreamingAgent:
@@ -85,7 +86,7 @@ def _attach_runtime(test_app: FastAPI, agent):
         agent=agent,
         semantic_memory=memory,
         task_executor=executor,
-        context_manager=task_context_manager,
+        context_manager=TaskContextManager(),
     )
     test_app.state.container = runtime
     return runtime
@@ -101,13 +102,17 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
     _attach_runtime(test_app, fake_agent)
 
     monkeypatch.setattr(
-        agent_routes,
-        "_save_session",
+        chat_routes.chat_service,
+        "save_session",
         lambda *args, **kwargs: saved_messages.append((args, kwargs)),
     )
-    monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="天气"))
-    monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
-    monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
+    monkeypatch.setattr(
+        chat_routes.chat_service,
+        "generate_title",
+        AsyncMock(return_value="天气"),
+    )
+    monkeypatch.setattr(chat_routes.chat_service, "update_session_title", lambda *args: None)
+    monkeypatch.setattr(chat_routes.online_eval, "record", lambda record: None)
 
     with TestClient(test_app) as client:
         response = client.post(
@@ -155,19 +160,23 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
     _attach_runtime(test_app, graph)
 
     monkeypatch.setattr(
-        agent_routes,
-        "_save_session",
+        chat_routes.chat_service,
+        "save_session",
         lambda *args, **kwargs: saved_messages.append((args, kwargs)),
     )
-    monkeypatch.setattr(agent_routes, "_generate_title", AsyncMock(return_value="代号测试"))
-    monkeypatch.setattr(agent_routes, "_update_session_title", lambda *args: None)
     monkeypatch.setattr(
-        agent_routes.store,
+        chat_routes.chat_service,
+        "generate_title",
+        AsyncMock(return_value="代号测试"),
+    )
+    monkeypatch.setattr(chat_routes.chat_service, "update_session_title", lambda *args: None)
+    monkeypatch.setattr(
+        chat_routes.store,
         "get_session_owner",
         lambda session_id: "anon_v5-test-user",
     )
-    monkeypatch.setattr(agent_routes.store, "touch_last_active", lambda session_id: None)
-    monkeypatch.setattr(agent_routes.online_eval, "record", lambda record: None)
+    monkeypatch.setattr(chat_routes.store, "touch_last_active", lambda session_id: None)
+    monkeypatch.setattr(chat_routes.online_eval, "record", lambda record: None)
 
     headers = {"X-Anonymous-Id": "v5-test-user"}
     with TestClient(test_app) as client:
@@ -240,7 +249,7 @@ def test_v7_user_cannot_access_another_users_conversation(monkeypatch):
     _attach_runtime(test_app, fake_agent)
 
     monkeypatch.setattr(
-        agent_routes.store,
+        chat_routes.store,
         "get_session_owner",
         lambda session_id: "user_a",
     )

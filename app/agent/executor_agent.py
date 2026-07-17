@@ -10,8 +10,9 @@ import logging
 
 from langgraph.types import Command
 
+from app.bootstrap.container import get_application_container
 from app.common.streaming import extract_text_content, make_event, make_sse
-from app.harness.task_context import ChatContext, task_context_manager
+from app.harness.task_context import ChatContext
 
 logger = logging.getLogger("apis")
 
@@ -26,10 +27,19 @@ class ExecutorAgent:
     差异仅在于 system_prompt（引导逐步执行）和 tools（精简）。
     """
 
-    def __init__(self, snapshot, plan_text: str = ""):
+    def __init__(
+        self,
+        snapshot,
+        plan_text: str = "",
+        *,
+        executor_agent=None,
+        context_manager=None,
+    ):
         self.snapshot = snapshot
         self.plan_text = plan_text
         self.cancel_event = snapshot.cancel_event
+        self._executor_agent = executor_agent
+        self._context_manager = context_manager
 
     async def run(self):
         yield {"_task_status": "running"}
@@ -48,20 +58,23 @@ class ExecutorAgent:
             yield event
 
     async def _stream(self, inputs):
-        # 复用 lifespan 注入的单例，该图已绑定 checkpointer/store/HITL middleware。
-        from app.harness.task_executor import task_executor
+        executor_agent = self._executor_agent
+        context_manager = self._context_manager
+        if executor_agent is None or context_manager is None:
+            container = get_application_container()
+            executor_agent = executor_agent or container.executor_agent
+            context_manager = context_manager or container.context_manager
 
-        parent_context = task_context_manager.get()
-        task_context_manager.set(ChatContext(
+        parent_context = context_manager.get()
+        context_manager.set(ChatContext(
             user_id=self.snapshot.user_id or parent_context.user_id,
             session_id=self.snapshot.session_id or self.snapshot.conversation_id,
             task_id=self.snapshot.task_id,
             trace_id=parent_context.trace_id,
         ))
         try:
-            agent = task_executor.executor_agent
-            if agent is None:
-                raise RuntimeError("executor_agent 未初始化（lifespan 未注入 task_executor.executor_agent）")
+            if executor_agent is None:
+                raise RuntimeError("executor_agent 未初始化（lifespan 尚未完成依赖装配）")
 
             # 后台任务用独立 thread_id（=task_id），与 /chat 会话历史隔离；
             # checkpointer 会为其维护独立历史，支持中断恢复
@@ -70,7 +83,11 @@ class ExecutorAgent:
                 "configurable": {"thread_id": self.snapshot.task_id},
             }
             interrupts = ()
-            async for chunk in agent.astream_events(inputs, version="v2", config=config):
+            async for chunk in executor_agent.astream_events(
+                inputs,
+                version="v2",
+                config=config,
+            ):
                 if self.cancel_event.is_set():
                     yield make_sse(json.dumps({"type": "text", "content": "\n\n[任务已取消]"}, ensure_ascii=False))
                     return
@@ -98,8 +115,8 @@ class ExecutorAgent:
                     if text:
                         yield make_event("text", content=text)
 
-            if not interrupts and hasattr(agent, "aget_state"):
-                state = await agent.aget_state(config)
+            if not interrupts and hasattr(executor_agent, "aget_state"):
+                state = await executor_agent.aget_state(config)
                 interrupts = getattr(state, "interrupts", ())
 
             if interrupts:
@@ -123,7 +140,7 @@ class ExecutorAgent:
             yield make_sse(json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False))
             yield {"_task_status": "failed"}
         finally:
-            task_context_manager.set(parent_context)
+            context_manager.set(parent_context)
 
 
 def _build_resume_command(resume_data: dict) -> Command:

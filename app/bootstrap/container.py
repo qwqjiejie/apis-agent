@@ -19,6 +19,8 @@ class ApplicationContainer:
     checkpointer: Any = None
     store: Any = None
     minio_client: Any = None
+    vector_store: Any = None
+    file_service: Any = None
     agent: Any = None
     executor_agent: Any = None
     specialist_subagents: list[Any] = field(default_factory=list)

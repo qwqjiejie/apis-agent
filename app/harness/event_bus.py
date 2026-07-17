@@ -30,8 +30,8 @@ class EventBus:
     def set_redis(self, redis_client):
         """注入 Redis 客户端，启用跨进程 Pub/Sub。
 
-        lifespan 中调用，让模块级单例 event_bus 在 Redis 可用时
-        从纯内存模式升级为跨进程广播模式。
+        lifespan 中调用，让当前应用实例在 Redis 可用时从纯内存模式
+        升级为跨进程广播模式。
         """
         self._redis = redis_client
         self._redis_available = redis_client is not None
@@ -69,6 +69,3 @@ class EventBus:
             except Exception:
                 logger.warning("[EventBus] Redis 发布失败，降级为纯内存模式")
                 self._redis_available = False
-
-
-event_bus = EventBus()

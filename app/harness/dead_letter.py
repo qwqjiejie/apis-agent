@@ -146,6 +146,3 @@ class DeadLetterQueue:
     def pending_count(self) -> int:
         """内存兜底中的待处理数量；完整数量使用 list_pending。"""
         return len(self._memory)
-
-
-dead_letter_queue = DeadLetterQueue()

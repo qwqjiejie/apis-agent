@@ -6,8 +6,8 @@ import uuid
 
 from langchain_core.tools import tool
 
+from app.bootstrap.container import get_application_container
 from app.tool.registry import register_tool
-from app.harness.task_context import task_context_manager
 
 logger = logging.getLogger("apis")
 
@@ -98,13 +98,14 @@ def set_shell_side_queue(queue: asyncio.Queue | None):
 
 async def _request_confirmation(command: str) -> bool:
     """请求用户确认危险命令。超时 120 秒默认拒绝。"""
+    context = get_application_container().context_manager.get()
     confirm_id = uuid.uuid4().hex[:8]
     event = asyncio.Event()
     _pending[confirm_id] = {
         "event": event,
         "approved": False,
         "command": command,
-        "user_id": task_context_manager.get().user_id,
+        "user_id": context.user_id,
     }
 
     if _side_queue is not None:
