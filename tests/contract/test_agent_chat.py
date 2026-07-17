@@ -9,12 +9,11 @@ from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.api.routes import agent as agent_routes
 from app.api.routes import chat_routes
-from app.auth import generate_token
 from app.bootstrap.container import ApplicationContainer
 from app.gateway.model_gateway import ModelGateway
-from app.harness.task_context import TaskContextManager
+from app.modules.identity.auth import generate_token
+from app.modules.tasks.context import TaskContextManager
 
 
 class FakeStreamingAgent:
@@ -97,8 +96,7 @@ def test_v1_simple_chat_streams_text_and_complete(monkeypatch):
     saved_messages = []
 
     test_app = FastAPI()
-    test_app.include_router(agent_routes.router, prefix="/api/v1")
-    test_app.include_router(agent_routes.chat_router, prefix="/api/v1")
+    test_app.include_router(chat_routes.router, prefix="/api/v1")
     _attach_runtime(test_app, fake_agent)
 
     monkeypatch.setattr(
@@ -156,7 +154,7 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
     saved_messages = []
 
     test_app = FastAPI()
-    test_app.include_router(agent_routes.router, prefix="/api/v1")
+    test_app.include_router(chat_routes.router, prefix="/api/v1")
     _attach_runtime(test_app, graph)
 
     monkeypatch.setattr(
@@ -181,14 +179,14 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
     headers = {"X-Anonymous-Id": "v5-test-user"}
     with TestClient(test_app) as client:
         first = client.post(
-            "/api/v1/agent/chat",
+            "/api/v1/chat",
             json={"message": "请记住我的代号是青竹"},
             headers=headers,
         )
         conversation_id = first.headers["x-session-id"]
 
         second = client.post(
-            "/api/v1/agent/chat",
+            "/api/v1/chat",
             json={
                 "message": "我上一轮说的代号是什么？",
                 "conversationId": conversation_id,
@@ -245,7 +243,7 @@ def test_v5_same_conversation_uses_checkpointer_history(monkeypatch):
 def test_v7_user_cannot_access_another_users_conversation(monkeypatch):
     fake_agent = FakeStreamingAgent()
     test_app = FastAPI()
-    test_app.include_router(agent_routes.chat_router, prefix="/api/v1")
+    test_app.include_router(chat_routes.router, prefix="/api/v1")
     _attach_runtime(test_app, fake_agent)
 
     monkeypatch.setattr(

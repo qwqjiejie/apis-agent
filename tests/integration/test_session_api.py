@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.api.main import app
-from app.service.session_service import store
+from app.modules.chat.sessions import store
 
 client = TestClient(app)
 

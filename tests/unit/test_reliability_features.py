@@ -11,8 +11,8 @@ from app.agent.agent_factory import _build_llm, _build_middleware
 from app.gateway.middleware import GatewayModelWrapper
 from app.gateway.model_gateway import ModelGateway
 from app.gateway.status_events import drain_gateway_status, gateway_status_queue
-from app.harness.dead_letter import DeadLetterQueue
-from app.harness.task_context import PgTaskStore
+from app.modules.tasks.dead_letter import DeadLetterQueue
+from app.modules.tasks.context import PgTaskStore
 from app.memory.semantic_memory import SemanticMemoryStore
 
 

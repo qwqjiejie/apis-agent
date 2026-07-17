@@ -7,7 +7,7 @@
 - 登录时自动将匿名 session 迁移到账号下
 
 使用方式:
-    from app.auth import get_current_user_id
+    from app.modules.identity.auth import get_current_user_id
 
     # 在路由中获取当前用户ID（匿名UUID或登录用户ID）
     user_id = get_current_user_id(request)

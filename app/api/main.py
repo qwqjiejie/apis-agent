@@ -11,7 +11,11 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.middleware.rate_limit import RateLimitMiddleware
-from app.api.routes.agent import chat_router, router as agent_router
+from app.api.routes.artifact_routes import router as artifact_router
+from app.api.routes.chat_routes import router as chat_router
+from app.api.routes.feedback_routes import router as feedback_router
+from app.api.routes.gateway_routes import router as gateway_router
+from app.api.routes.task_routes import router as task_router
 from app.api.routes.session import router as session_router
 from app.api.routes.file import router as file_router
 from app.api.routes.skill_routes import router as skill_router
@@ -73,9 +77,6 @@ async def _do_rebuild(app: FastAPI):
     container.agent = new_triage
     container.executor_agent = new_executor
     container.specialist_subagents = subagents
-    app.state.agent = new_triage
-    app.state.executor_agent = new_executor
-    app.state.specialist_subagents = subagents
     if container.task_executor is not None:
         container.task_executor.executor_agent = new_executor
     _last_rebuild_time = time.monotonic()
@@ -109,21 +110,15 @@ async def lifespan(app: FastAPI):
         await gateway.register(s.fallback_model, fl, is_primary=False)
         gateway.set_fallback([s.fallback_model])
     await gateway.start_probe(s.gateway_health_probe_interval_sec)
-    # 兼容旧调用方；运行时对象的权威来源是 app.state.container。
-    app.state.model_gateway = gateway
 
     # ── 2. PG Store (checkpointer + store) ─────────
     from app.infrastructure.postgres.langgraph_store import pg_store_manager
-    app.state.checkpointer = None
-    app.state.store = None
     if await pg_store_manager.initialize():
-        app.state.checkpointer = pg_store_manager.checkpointer
-        app.state.store = pg_store_manager.store
-    container.checkpointer = app.state.checkpointer
-    container.store = app.state.store
+        container.checkpointer = pg_store_manager.checkpointer
+        container.store = pg_store_manager.store
 
     # ── 4. MinIO ────────────────────────────────────
-    app.state.minio_client = None
+    minio_client = None
     if s.minio_host:
         try:
             from app.infrastructure.minio.client import (
@@ -134,11 +129,11 @@ async def lifespan(app: FastAPI):
             health = await asyncio.to_thread(check_minio, minio, s)
             if not health.available:
                 raise RuntimeError(health.detail)
-            app.state.minio_client = minio
+            minio_client = minio
             logger.info(f"[main] MinIO 已连接: {s.minio_host}")
         except Exception as e:
             logger.warning(f"[main] MinIO 不可用: {e}")
-    container.minio_client = app.state.minio_client
+    container.minio_client = minio_client
 
     # ── 3. 文档基础设施 ────────────────────────────────
     from app.modules.documents.service import file_service
@@ -156,7 +151,6 @@ async def lifespan(app: FastAPI):
     from app.agent.agent_factory import _build_subagents_from_specialists
     subagents = _build_subagents_from_specialists()
     container.specialist_subagents = subagents
-    app.state.specialist_subagents = subagents
 
     # ── 4. 创建 Triage DeepAgent ────────────────────
     from app.agent.agent_factory import create_triage_agent, create_executor_agent
@@ -167,7 +161,6 @@ async def lifespan(app: FastAPI):
         checkpointer=container.checkpointer,
         store=container.store,
     )
-    app.state.agent = container.agent
     logger.info("[main] Triage DeepAgent 创建完成 (subagents=%d)", len(subagents))
 
     # ── 5. 创建 Executor DeepAgent ──────────────────
@@ -177,7 +170,6 @@ async def lifespan(app: FastAPI):
         store=container.store,
         interrupt_on={"request_approval": True},
     )
-    app.state.executor_agent = container.executor_agent
     logger.info("[main] Executor DeepAgent 创建完成")
 
     # ── 6. 任务运行时依赖 ────────────────────────────
@@ -217,9 +209,6 @@ async def lifespan(app: FastAPI):
     container.dead_letter_queue = dead_letter_queue
     container.semantic_memory = semantic_memory
     container.event_bus = event_bus
-    app.state.task_executor = task_executor
-    app.state.context_manager = task_context_manager
-    app.state.event_bus = event_bus
 
     # 关键持久化失败通过 PG DeadLetter 重试；PG 不可用时队列自动退回内存。
     async def _retry_snapshot(args):
@@ -267,7 +256,6 @@ async def lifespan(app: FastAPI):
     hot_reloader = ToolHotReloader(tools_dir, on_reload=lambda: _rebuild_agents(app))
     await hot_reloader.start()
     container.tool_hot_reloader = hot_reloader
-    app.state.tool_hot_reloader = hot_reloader
 
     # ── 12. SubAgent 热加载 ──────────────────────────
     from app.harness.subagent_hot_reloader import SubAgentHotReloader
@@ -275,7 +263,6 @@ async def lifespan(app: FastAPI):
     sa_reloader = SubAgentHotReloader(specialists_dir, on_reload=lambda: _rebuild_agents(app))
     await sa_reloader.start()
     container.subagent_hot_reloader = sa_reloader
-    app.state.subagent_hot_reloader = sa_reloader
 
     # ── 13. 恢复后台任务 ────────────────────────────
     await task_executor.recover_tasks()
@@ -343,8 +330,11 @@ async def unhandled_error_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"code": 500, "data": None, "message": "服务器内部错误"})
 
 
-app.include_router(agent_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(task_router, prefix="/api/v1/agent")
+app.include_router(gateway_router, prefix="/api/v1/agent")
+app.include_router(artifact_router, prefix="/api/v1/agent")
+app.include_router(feedback_router, prefix="/api/v1/agent")
 app.include_router(session_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1")
 app.include_router(skill_router)

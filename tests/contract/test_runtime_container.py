@@ -1,5 +1,4 @@
 import json
-import importlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,13 +7,12 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
-from app.api.routes.agent import (
-    GatewaySwitchRequest,
-    chat_router,
-    gateway_status,
-    gateway_switch,
-    router as agent_router,
-)
+from app.api.routes.agent_schemas import GatewaySwitchRequest
+from app.api.routes.artifact_routes import router as artifact_router
+from app.api.routes.chat_routes import router as chat_router
+from app.api.routes.feedback_routes import router as feedback_router
+from app.api.routes.gateway_routes import gateway_status, gateway_switch, router as gateway_router
+from app.api.routes.task_routes import router as task_router
 from app.bootstrap.container import (
     ApplicationContainer,
     clear_application_container,
@@ -24,11 +22,18 @@ from app.bootstrap.container import (
 from app.common.llm import build_llm
 from app.gateway.middleware import GatewayModelWrapper
 from app.gateway.model_gateway import ModelGateway
-from app.harness.dead_letter import DeadLetterQueue
-from app.harness.event_bus import EventBus
-from app.harness.task_context import ChatContext, TaskContextManager
-from app.harness.task_executor import TaskExecutor
+from app.modules.tasks.dead_letter import DeadLetterQueue
+from app.modules.tasks.events import EventBus
+from app.modules.tasks.context import ChatContext, TaskContextManager
+from app.modules.tasks.executor import TaskExecutor
 from app.tool.task_tools import get_task_status
+
+
+def _include_agent_routes(test_app: FastAPI) -> None:
+    test_app.include_router(task_router, prefix="/api/v1/agent")
+    test_app.include_router(gateway_router, prefix="/api/v1/agent")
+    test_app.include_router(artifact_router, prefix="/api/v1/agent")
+    test_app.include_router(feedback_router, prefix="/api/v1/agent")
 
 
 @pytest.mark.asyncio
@@ -178,15 +183,14 @@ def test_file_and_vector_store_construction_has_no_external_client_side_effects(
     assert file_service._minio is None
 
 
-def test_agent_route_split_preserves_public_openapi_contract():
+def test_agent_route_split_uses_direct_route_modules():
     test_app = FastAPI()
-    test_app.include_router(agent_router, prefix="/api/v1")
+    _include_agent_routes(test_app)
     test_app.include_router(chat_router, prefix="/api/v1")
     paths = test_app.openapi()["paths"]
 
     expected_paths = {
         "/api/v1/chat",
-        "/api/v1/agent/chat",
         "/api/v1/agent/task/status",
         "/api/v1/agent/task/stream",
         "/api/v1/agent/task/cancel",
@@ -200,7 +204,6 @@ def test_agent_route_split_preserves_public_openapi_contract():
         "/api/v1/agent/feedback",
     }
     assert set(paths) == expected_paths
-    assert paths["/api/v1/agent/chat"]["post"]["deprecated"] is True
     assert "deprecated" not in paths["/api/v1/chat"]["post"]
 
 
@@ -212,7 +215,7 @@ def test_task_stream_preserves_sse_event_contract():
         }),
     )
     test_app = FastAPI()
-    test_app.include_router(agent_router, prefix="/api/v1")
+    _include_agent_routes(test_app)
     test_app.state.container = ApplicationContainer(
         model_gateway=ModelGateway(),
         task_executor=executor,
@@ -236,48 +239,3 @@ def test_task_stream_preserves_sse_event_contract():
         {"type": "complete"},
     ]
     assert data[-1] == "[DONE]"
-
-
-def test_document_module_keeps_legacy_imports_compatible():
-    legacy_service = importlib.import_module("app.service.file_service")
-    module_service = importlib.import_module("app.modules.documents.service")
-    legacy_status = importlib.import_module("app.document.document_status")
-    module_status = importlib.import_module("app.modules.documents.status")
-    legacy_retrieval = importlib.import_module("app.rag.retrieval_pipeline")
-    module_retrieval = importlib.import_module("app.modules.documents.retrieval")
-
-    assert legacy_service.FileService is module_service.FileService
-    assert legacy_status.DocumentStatus is module_status.DocumentStatus
-    assert legacy_retrieval.RetrievalPipeline is module_retrieval.RetrievalPipeline
-
-
-def test_task_module_keeps_legacy_imports_compatible():
-    legacy_context = importlib.import_module("app.harness.task_context")
-    module_context = importlib.import_module("app.modules.tasks.context")
-    legacy_executor = importlib.import_module("app.harness.task_executor")
-    module_executor = importlib.import_module("app.modules.tasks.executor")
-    legacy_events = importlib.import_module("app.harness.event_bus")
-    module_events = importlib.import_module("app.modules.tasks.events")
-    legacy_dead_letter = importlib.import_module("app.harness.dead_letter")
-    module_dead_letter = importlib.import_module("app.modules.tasks.dead_letter")
-
-    assert legacy_context.TaskSnapshot is module_context.TaskSnapshot
-    assert legacy_context.PgTaskStore is module_context.PgTaskStore
-    assert legacy_executor.TaskExecutor is module_executor.TaskExecutor
-    assert legacy_events.EventBus is module_events.EventBus
-    assert legacy_dead_letter.DeadLetterQueue is module_dead_letter.DeadLetterQueue
-
-
-def test_business_modules_keep_legacy_imports_compatible():
-    legacy_sessions = importlib.import_module("app.service.session_service")
-    module_sessions = importlib.import_module("app.modules.chat.sessions")
-    legacy_auth = importlib.import_module("app.auth")
-    module_auth = importlib.import_module("app.modules.identity.auth")
-    legacy_skills = importlib.import_module("app.skill.skill_manager")
-    module_skills = importlib.import_module("app.modules.skills.manager")
-
-    assert legacy_sessions.Store is module_sessions.Store
-    assert legacy_sessions.store is module_sessions.store
-    assert legacy_auth.generate_token is module_auth.generate_token
-    assert legacy_skills.SkillManager is module_skills.SkillManager
-    assert legacy_skills.skill_manager is module_skills.skill_manager

@@ -25,7 +25,6 @@ from app.modules.chat import service as chat_service
 from app.modules.chat.sessions import store
 
 router = APIRouter(tags=["agent"])
-legacy_router = APIRouter(tags=["agent"])
 
 
 def _check_query_length(query: str) -> None:
@@ -34,7 +33,6 @@ def _check_query_length(query: str) -> None:
 
 
 @router.post("/chat")
-@legacy_router.post("/chat", deprecated=True)
 async def agent_chat(req: ChatRequest, request: Request):
     query = req.get_message()
     conversation_id = req.get_conversation_id()

@@ -86,14 +86,6 @@ class TaskExecutor:
     def dead_letter_queue(self) -> DeadLetterQueue:
         return self._dead_letter_queue
 
-    def configure(self, *, store: TaskStore, executor_agent=None) -> None:
-        """兼容旧调用方；新代码应在构造时注入依赖。"""
-        if self._running:
-            raise RuntimeError("存在运行中任务时不能替换 TaskStore")
-        self._store = store
-        self.executor_agent = executor_agent
-        self._draining = False
-
     # ── 对外接口 ──────────────────────────────────
 
     async def submit(

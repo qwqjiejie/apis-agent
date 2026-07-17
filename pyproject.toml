@@ -57,7 +57,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "unit: isolated logic and adapter tests without external services",
-    "contract: HTTP, SSE and compatibility contract tests",
+    "contract: HTTP and SSE contract tests",
     "integration: tests requiring PostgreSQL or another real service",
     "e2e: deployment-level end-to-end tests",
 ]

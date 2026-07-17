@@ -26,9 +26,6 @@ class DeadLetterQueue:
         self._scan_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
-    def configure(self, store=None) -> None:
-        self._store = store
-
     async def enqueue(
         self,
         operation_type: str,

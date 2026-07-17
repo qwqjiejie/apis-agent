@@ -1,4 +1,4 @@
-from app.utils.text_splitter import split_text
+from app.modules.documents.chunking import split_text
 
 
 class TestSplitText:

@@ -14,21 +14,22 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.agent.executor_agent import ExecutorAgent, _build_resume_command
-from app.api.routes import agent as agent_routes
+from app.api.routes.agent_schemas import TaskResumeRequest
 from app.api.routes import chat_routes
+from app.api.routes.task_routes import router as task_router, task_resume
 from app.bootstrap.container import (
     ApplicationContainer,
     clear_application_container,
     set_application_container,
 )
 from app.gateway.model_gateway import ModelGateway
-from app.harness.event_bus import EventBus
-from app.harness.task_context import (
+from app.modules.tasks.events import EventBus
+from app.modules.tasks.context import (
     PgTaskStore,
     TaskSnapshot,
     TaskStatus,
 )
-from app.harness.task_executor import TaskExecutor
+from app.modules.tasks.executor import TaskExecutor
 from app.tool.task_tools import create_background_task
 
 
@@ -295,8 +296,8 @@ async def test_v4_resume_endpoint_continues_same_checkpoint(monkeypatch):
     else:
         pytest.fail("任务未进入 waiting_human")
 
-    response = await agent_routes.task_resume(
-        agent_routes.TaskResumeRequest(taskId=task_id, action="approved"),
+    response = await task_resume(
+        TaskResumeRequest(taskId=task_id, action="approved"),
         Request({
             "type": "http",
             "headers": [(b"x-anonymous-id", b"v4-test-user")],
@@ -450,7 +451,8 @@ def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
     executor.executor_agent = BlockingExecutorGraph()
 
     test_app = FastAPI()
-    test_app.include_router(agent_routes.router, prefix="/api/v1")
+    test_app.include_router(chat_routes.router, prefix="/api/v1")
+    test_app.include_router(task_router, prefix="/api/v1/agent")
     runtime = _attach_runtime(test_app, executor, BackgroundTaskTriageAgent())
     set_application_container(runtime)
 
@@ -467,7 +469,7 @@ def test_v2_chat_creates_background_task_and_status_is_queryable(monkeypatch):
         with TestClient(test_app) as client:
             headers = {"X-Anonymous-Id": "v2-test-user"}
             response = client.post(
-                "/api/v1/agent/chat",
+                "/api/v1/chat",
                 json={"message": "请完成一份需要多个专家协作的复杂研究报告"},
                 headers=headers,
             )

@@ -1,23 +1,5 @@
-import logging
-
 from app.common.langfuse_client import observe
 from app.modules.documents.retrieval import build_context_enhanced
-from app.modules.documents.embedding import embed_query, embedding_available
-from app.infrastructure.milvus.vector_store import vector_store
-
-logger = logging.getLogger("apis")
-
-
-@observe(name="rag.retrieve")
-def retrieve(file_id: str, query: str, top_k: int = 5) -> list[dict]:
-    """简单单路检索（向后兼容）。新代码建议使用 build_context。"""
-    if not embedding_available() or not vector_store.ready:
-        return []
-    q_vec = embed_query(query)
-    if not q_vec:
-        return []
-    results = vector_store.search(q_vec, top_k=top_k)
-    return [r for r in results if r.get("file_id") == file_id]
 
 
 @observe(name="rag.build_context")

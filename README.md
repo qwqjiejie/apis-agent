@@ -94,7 +94,7 @@ Triage DeepAgent (container.agent)
 | 启动与传输 | `app/main.py`、`app/bootstrap`、`app/api` | 基础设施预检、运行时依赖装配、FastAPI lifespan、中间件、路由和 SSE |
 | Agent 编排 | `app/agent`、`app/subagents`、`app/prompt` | Agent 构建、Executor 包装、领域代理和系统提示词 |
 | 业务模块 | `app/modules` | chat、tasks、documents、identity、skills 的用例、模型和端口 |
-| 可靠性 Harness | `app/harness` | 工具/SubAgent 热加载和旧任务路径兼容导出 |
+| 可靠性 Harness | `app/harness` | 工具/SubAgent 热加载 |
 | 模型网关 | `app/gateway` | 模型注册、健康状态、熔断、动态路由和状态事件 |
 | 基础设施 | `app/infrastructure` | PostgreSQL、Redis、Milvus、MinIO 和 Neo4j 适配器 |
 | 文档解析 | `app/readers` | MinerU 等外部解析器适配 |
@@ -296,7 +296,6 @@ docker compose up -d postgres redis minio milvus
 | Method | Endpoint | 说明 |
 |---|---|---|
 | POST | `/api/v1/chat` | 推荐的统一对话入口 |
-| POST | `/api/v1/agent/chat` | 兼容入口，已标记 deprecated |
 | POST | `/api/v1/agent/pptx/download` | 下载生成的 PPT |
 | POST | `/api/v1/agent/stop` | 通过 Redis 发布停止信号 |
 | POST | `/api/v1/agent/shell/confirm` | 确认或拒绝待执行 Shell 命令 |
@@ -367,7 +366,6 @@ apis-agent/
 |   |   |-- middleware/
 |   |   |   `-- rate_limit.py      # Redis/内存滑动窗口限流
 |   |   `-- routes/
-|   |       |-- agent.py           # Agent 子路由聚合和兼容导出
 |   |       |-- chat_routes.py     # 同步聊天和 SSE 输出
 |   |       |-- task_routes.py     # 后台任务查询、取消和恢复
 |   |       |-- gateway_routes.py  # 模型状态和热切换
@@ -400,7 +398,7 @@ apis-agent/
 |   |   |-- task_tools.py          # 后台任务创建和查询
 |   |   |-- approval_tools.py      # HITL 审批和 Journal 工具
 |   |   `-- ...                    # 搜索、文件、Shell、grep、tool_search
-|   |-- harness/                   # 热加载能力和旧任务路径兼容导出
+|   |-- harness/                   # 热加载能力
 |   |   |-- tool_hot_reloader.py   # 工具热加载
 |   |   `-- subagent_hot_reloader.py
 |   |-- gateway/
@@ -409,25 +407,18 @@ apis-agent/
 |   |   |-- circuit_breaker.py     # 三态熔断器
 |   |   |-- health_probe.py        # 周期探活
 |   |   `-- status_events.py       # SSE 降级状态桥接
-|   |-- service/                   # 旧业务路径兼容导出
-|   |-- storage/                   # 旧基础设施路径兼容导出
-|   |-- stores/                    # 旧 Store 路径兼容导出
-|   |-- rag/                       # 旧 RAG 路径兼容导出
-|   |-- document/                  # 旧文档路径兼容导出
 |   |-- readers/                   # MinerU 等文档解析器
 |   |-- memory/                    # 跨会话语义记忆
 |   |-- context/                   # token 统计和上下文压缩工具
-|   |-- skill/                     # 旧 SkillManager 路径兼容导出
 |   |-- skills/                    # 只读内置 SKILL.md
 |   |-- evaluation/                # 在线/离线 Agent 和 RAG 评估
 |   |-- common/                    # LLM、Redis、日志、异常、SSE、Langfuse
 |   |-- config/settings.py         # Pydantic Settings
-|   |-- auth.py                    # 匿名身份和 JWT
-|   |-- utils/                     # 图片识别、通用工具及旧文档工具兼容层
+|   |-- utils/                     # 图片识别和通用工具
 |   `-- static/                    # 由 FastAPI 托管的前端静态资源
 `-- tests/
     |-- unit/                      # 无外部系统
-    |-- contract/                  # API、SSE 和兼容契约
+    |-- contract/                  # API 和 SSE 契约
     |-- integration/               # PostgreSQL 等真实基础设施
     `-- e2e/                       # 部署级冒烟测试
 ```

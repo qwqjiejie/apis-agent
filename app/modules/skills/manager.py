@@ -239,7 +239,3 @@ class SkillManager:
             logger.warning("[SkillManager] 上传失败: %s", exc)
             shutil.rmtree(destination, ignore_errors=True)
             return None
-
-
-# 仅供旧导入和无应用容器的离线工具使用；在线运行实例由 ApplicationContainer 持有。
-skill_manager = SkillManager()

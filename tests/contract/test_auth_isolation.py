@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 from app.api import dependencies as api_dependencies
 from app.api.routes import file as file_routes
 from app.api.routes import session as session_routes
-from app.auth import generate_token
+from app.modules.identity.auth import generate_token
 from app.tool import bash_tool
 
 

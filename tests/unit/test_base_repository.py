@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import create_engine, String, Integer, Text, DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
-from app.storage.base import BaseRepository
+from app.infrastructure.postgres.repository import BaseRepository
 
 
 class TestBase(DeclarativeBase):
