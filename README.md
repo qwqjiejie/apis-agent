@@ -4,8 +4,8 @@
 Triage、Executor、Specialist 三层协作模型：Triage 处理同步对话与任务分流，
 Executor 驱动长周期后台任务，Specialist 通过声明式 `AGENT.md` 提供领域能力。
 
-当前仓库同时包含后端 API、轻量前端、任务可靠性组件、文档 RAG、Skills 管理和
-在线/离线评估工具，是一个单体部署、模块化组织的 Python 应用。
+当前仓库包含后端 API、轻量前端、任务可靠性组件、文档 RAG、Skills 管理和
+在线/离线评估工具，是一个单进程运行、模块化组织的 Python 应用。
 
 ## 核心能力
 
@@ -22,7 +22,7 @@ Executor 驱动长周期后台任务，Specialist 通过声明式 `AGENT.md` 提
 - **Skills 管理**：运行时 Skill 扫描、数据库状态、zip 上传、启用/禁用和删除
 - **轻量身份体系**：匿名身份、JWT 注册登录、匿名会话迁移，以及会话/文件/任务归属校验
 - **可观测性**：trace ID、结构化运行状态、Langfuse、在线指标采集和 deepEval 离线评估
-- **热加载**：工具模块和 Specialist 定义变更后重建 Triage/Executor，并原子替换应用引用
+- **热加载**：工具模块和 Specialist 定义变更后重建 Triage/Executor，并更新运行时容器引用
 
 ## 已内置 Specialist
 
@@ -43,7 +43,7 @@ Executor 驱动长周期后台任务，Specialist 通过声明式 `AGENT.md` 提
 | Agent 编排 | deepagents、LangChain、LangGraph |
 | 模型接口 | OpenAI-compatible Chat API |
 | 状态持久化 | AsyncPostgresSaver、AsyncPostgresStore |
-| 业务数据 | PostgreSQL、SQLAlchemy、psycopg2 |
+| 业务数据 | PostgreSQL、SQLAlchemy、psycopg/psycopg2 |
 | 缓存与事件 | Redis Pub/Sub、进程内降级 EventBus |
 | 向量检索 | Milvus、Embedding API |
 | 文件存储 | MinIO，本地临时文件兜底 |
@@ -84,7 +84,7 @@ Triage DeepAgent (container.agent)
                     `-- TaskSnapshot + Journal + EventBus
                                 |
                                 v
-                  AsyncPostgresStore / Memory fallback
+                  TaskStore: PostgreSQL / Memory fallback
 ```
 
 ### 分层职责
@@ -93,7 +93,7 @@ Triage DeepAgent (container.agent)
 |---|---|---|
 | 启动与传输 | `app/main.py`、`app/bootstrap`、`app/api` | 基础设施预检、运行时依赖装配、FastAPI lifespan、中间件、路由和 SSE |
 | Agent 编排 | `app/agent`、`app/subagents`、`app/prompt` | Agent 构建、Executor 包装、领域代理和系统提示词 |
-| 业务模块 | `app/modules` | chat、tasks、documents、identity、skills 的用例、模型和端口 |
+| 业务模块 | `app/modules` | chat、tasks、documents、identity、skills 的用例和领域逻辑 |
 | 可靠性 Harness | `app/harness` | 工具/SubAgent 热加载 |
 | 模型网关 | `app/gateway` | 模型注册、健康状态、熔断、动态路由和状态事件 |
 | 基础设施 | `app/infrastructure` | PostgreSQL、Redis、Milvus、MinIO 和 Neo4j 适配器 |
@@ -152,7 +152,7 @@ Query
 ```
 
 `app/modules/documents/graph.py` 和 Neo4j 适配器已经提供图谱检索基础组件，但当前默认
-`rag_service` 尚未把 GraphRAG 接入主检索链路。
+`app/modules/documents/rag.py` 仍走向量检索增强管线，尚未把 GraphRAG 接入主链路。
 
 ### 模型网关
 
@@ -171,7 +171,7 @@ Query
 ### 推荐启动路径
 
 ```text
-python app/main.py
+python -m app.main
   -> PostgreSQL / Redis / 已配置 Milvus 预检
   -> 启动 app.api.main:app
   -> FastAPI lifespan 初始化运行时组件
@@ -182,10 +182,10 @@ lifespan 初始化顺序：
 1. ModelGateway、主模型、可选 fallback 和健康探活。
 2. LangGraph PostgreSQL checkpointer/store。
 3. 可选 MinIO。
-4. Specialist 发现，创建 Triage 和 Executor DeepAgent。
-5. TaskStore、TaskExecutor、TaskContextManager。
+4. 文档基础设施、Specialist 发现，创建 Triage 和 Executor DeepAgent。
+5. TaskStore、TaskExecutor、TaskContextManager、SemanticMemory。
 6. DeadLetter 及快照/Journal 重试处理器。
-7. SemanticMemory 和 SkillManager。
+7. SkillManager。
 8. 可选 Neo4j、Redis EventBus。
 9. DeadLetter 扫描器、Tool/SubAgent 热加载器。
 10. 处理持久化的未完成任务。
@@ -212,7 +212,6 @@ Neo4j 连接。
 ### 环境要求
 
 - Python 3.11-3.14
-- uv 0.8+
 - PostgreSQL 16+
 - Redis
 - 可选：Milvus 2.4+、MinIO、Neo4j、Langfuse、MinerU
@@ -412,7 +411,7 @@ apis-agent/
 |   |-- context/                   # token 统计和上下文压缩工具
 |   |-- skills/                    # 只读内置 SKILL.md
 |   |-- evaluation/                # 在线/离线 Agent 和 RAG 评估
-|   |-- common/                    # LLM、Redis、日志、异常、SSE、Langfuse
+|   |-- common/                    # LLM、日志、异常、SSE、Langfuse
 |   |-- config/settings.py         # Pydantic Settings
 |   |-- utils/                     # 图片识别和通用工具
 |   `-- static/                    # 由 FastAPI 托管的前端静态资源
@@ -468,7 +467,7 @@ async def my_search(query: str) -> str:
 ### 新增运行时 Skill
 
 内置 Skill 在 `app/skills/<name>/SKILL.md` 创建带 `name` 和 `description` 的
-frontmatter；它随镜像发布并保持只读。用户上传的 zip 写入
+frontmatter；它随仓库发布并保持只读。用户上传的 zip 写入
 `DATA_DIR/MANAGED_SKILLS_DIR`，SkillManager 将两类定义同步到 `agentx_skill`。
 
 ### 测试
@@ -479,8 +478,8 @@ pytest -m contract
 pytest -m integration       # 需要先导入 sql/apis_agent_pg.sql 并启动 PostgreSQL
 ```
 
-当前测试集共收集 115 项：无外部依赖的 unit + contract 共 106 项，PostgreSQL
-integration 共 9 项。最终本地回归为 115 项全部通过。
+测试按 `unit`、`contract`、`integration` 分层组织；`integration` 需要真实 PostgreSQL
+和业务表结构。
 
 质量检查：
 
