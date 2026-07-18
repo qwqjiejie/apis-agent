@@ -2,6 +2,7 @@
 
 import uuid
 from dataclasses import dataclass
+from threading import Lock
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -31,7 +32,39 @@ class UserIdentity:
 class IdentityService:
     """同步业务数据库用例；异步 API 应在线程池中调用。"""
 
+    def __init__(self):
+        self._schema_ready = False
+        self._schema_lock = Lock()
+
+    def ensure_schema(self) -> None:
+        """幂等创建认证所需表，兼容已初始化但缺少用户表的旧数据库。"""
+        if self._schema_ready:
+            return
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            with session_scope() as db:
+                db.execute(text(
+                    """CREATE TABLE IF NOT EXISTS agentx_user (
+                       id              BIGSERIAL PRIMARY KEY,
+                       user_id         VARCHAR(64)  NOT NULL,
+                       username        VARCHAR(50)  NOT NULL,
+                       password_hash   VARCHAR(128) NOT NULL,
+                       created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+                    )"""
+                ))
+                db.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uk_user_user_id ON agentx_user(user_id)"
+                ))
+                db.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uk_user_username ON agentx_user(username)"
+                ))
+            self._schema_ready = True
+
     def register(self, username: str, password: str) -> UserIdentity:
+        self.ensure_schema()
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         try:
             with session_scope() as db:
@@ -58,6 +91,7 @@ class IdentityService:
         return UserIdentity(user_id=user_id, username=username)
 
     def login(self, username: str, password: str) -> UserIdentity:
+        self.ensure_schema()
         with session_scope() as db:
             row = db.execute(
                 text(

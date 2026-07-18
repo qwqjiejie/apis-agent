@@ -8,6 +8,16 @@ createApp({
         const agents = ref(APP_CONSTANTS.AGENTS);
         const { STREAM_TYPES, SUPPORTED_FILE_TYPES } = APP_CONSTANTS;
 
+        // ===== 认证状态 =====
+        const authReady = ref(false);
+        const isAuthenticated = ref(false);
+        const authUser = ref(null);
+        const authMode = ref('login');
+        const authForm = ref({ username: '', password: '', confirmPassword: '' });
+        const authError = ref('');
+        const authLoading = ref(false);
+        const showPassword = ref(false);
+
         // ===== 状态 =====
         const selectedAgent = ref('chat');
         const chatList = ref([]);
@@ -56,13 +66,146 @@ createApp({
 
         // ===== 初始化 =====
         onMounted(async () => {
-            await loadChatsFromStorage();
-            createNewChat();
             APP_UTILS.setupMarkdown();
+            APP_API.getAnonymousId();
+            await restoreAuth();
         });
 
         // ===== 工具函数（使用 utils.js） =====
         const { generateId, formatFileSize, renderMarkdown, processReferences, processRecommendations } = APP_UTILS;
+
+        // ===== 认证处理 =====
+        const authTitle = computed(() => authMode.value === 'login' ? '登录蜂巢智能' : '创建账号');
+        const authSubtitle = computed(() => authMode.value === 'login'
+            ? '继续你的会话、文件和任务'
+            : '注册后自动进入工作台');
+        const authSubmitLabel = computed(() => authMode.value === 'login' ? '登录' : '注册并进入');
+        const userInitial = computed(() => {
+            const username = authUser.value?.username || 'U';
+            return username.trim().slice(0, 1).toUpperCase();
+        });
+
+        const restoreAuth = async () => {
+            const state = APP_API.getAuthState();
+            if (!state.isAuthenticated) {
+                authReady.value = true;
+                isAuthenticated.value = false;
+                return;
+            }
+
+            try {
+                const currentUser = await APP_API.getCurrentUser(backendUrl.value);
+                if (!currentUser || currentUser.isAnonymous) {
+                    APP_API.logout();
+                    authReady.value = true;
+                    isAuthenticated.value = false;
+                    return;
+                }
+
+                authUser.value = {
+                    userId: currentUser.userId,
+                    username: state.user?.username || '已登录用户'
+                };
+                isAuthenticated.value = true;
+                authReady.value = true;
+                await enterApplication();
+            } catch (error) {
+                APP_API.logout();
+                authReady.value = true;
+                isAuthenticated.value = false;
+                authError.value = '登录状态已失效，请重新登录';
+            }
+        };
+
+        const enterApplication = async () => {
+            await testConnection();
+            await loadChatsFromStorage();
+            await createNewChat();
+        };
+
+        const switchAuthMode = (mode) => {
+            authMode.value = mode;
+            authError.value = '';
+            authForm.value.confirmPassword = '';
+        };
+
+        const submitAuth = async () => {
+            if (authLoading.value) return;
+
+            const username = authForm.value.username.trim();
+            const password = authForm.value.password;
+            const confirmPassword = authForm.value.confirmPassword;
+            authError.value = '';
+
+            if (!username) {
+                authError.value = '请输入用户名';
+                return;
+            }
+            if (!password) {
+                authError.value = '请输入密码';
+                return;
+            }
+            if (authMode.value === 'register') {
+                if (username.length < 2) {
+                    authError.value = '用户名至少 2 个字符';
+                    return;
+                }
+                if (password.length < 4) {
+                    authError.value = '密码至少 4 位';
+                    return;
+                }
+                if (password !== confirmPassword) {
+                    authError.value = '两次输入的密码不一致';
+                    return;
+                }
+            }
+
+            authLoading.value = true;
+            const anonymousId = APP_API.getAnonymousId();
+            try {
+                const identity = authMode.value === 'login'
+                    ? await APP_API.login(backendUrl.value, username, password)
+                    : await APP_API.register(backendUrl.value, username, password);
+
+                authUser.value = {
+                    userId: identity.userId,
+                    username: identity.username
+                };
+                isAuthenticated.value = true;
+                authForm.value = { username: '', password: '', confirmPassword: '' };
+
+                try {
+                    await APP_API.syncAnonymousSessions(backendUrl.value, anonymousId);
+                } catch (syncError) {
+                    console.warn('同步匿名会话失败:', syncError);
+                }
+
+                await enterApplication();
+                showToast(authMode.value === 'login' ? '登录成功' : '注册成功', 'success');
+            } catch (error) {
+                authError.value = error.message || '认证失败';
+            } finally {
+                authLoading.value = false;
+            }
+        };
+
+        const logout = () => {
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+            }
+            APP_API.logout();
+            isAuthenticated.value = false;
+            authUser.value = null;
+            chatList.value = [];
+            currentChatId.value = null;
+            inputMessage.value = '';
+            selectedFile.value = null;
+            uploadedFileId.value = null;
+            isSending.value = false;
+            authMode.value = 'login';
+            showToast('已退出登录', 'info');
+        };
 
         // ===== 直接更新流式输出的 DOM =====
         const updateStreamContent = (content, isThinking = false) => {
@@ -244,6 +387,10 @@ createApp({
 
         // ===== 消息发送和流式处理 =====
         const sendMessage = async (presetMessage = null) => {
+            if (!isAuthenticated.value) {
+                showToast('请先登录后再开始对话');
+                return;
+            }
             if (isSending.value || isUploading.value) return;
 
             const message = presetMessage || inputMessage.value.trim();
@@ -329,12 +476,12 @@ createApp({
 
                 const response = await fetch(apiUrl, {
                     method: 'POST',
-                    headers: {
+                    headers: APP_API.authHeaders({
                         'Content-Type': 'application/json',
                         'Accept': 'text/event-stream',
                         'Cache-Control': 'no-cache',
                         'Connection': 'keep-alive'
-                    },
+                    }),
                     body: JSON.stringify(body),
                     signal: signal
                 });
@@ -507,13 +654,18 @@ createApp({
                 }
             } else if (data.type === STREAM_TYPES.TOOL_END) {
                 const toolCallId = data.toolCallId || '';
-                const entry = aiMsg.timeline.find(t => t.type === 'tool' && t.toolCallId === toolCallId && t.status === 'running');
+                const toolName = data.toolName || 'unknown';
+                const entry = [...aiMsg.timeline]
+                    .reverse()
+                    .find(t => t.type === 'tool'
+                        && t.status === 'running'
+                        && ((toolCallId && t.toolCallId === toolCallId) || (!toolCallId && t.toolName === toolName)));
                 if (entry) {
                     entry.status = 'completed';
                 } else {
                     aiMsg.timeline.push({
                         type: 'tool',
-                        toolName: data.toolName || 'unknown',
+                        toolName,
                         toolCallId,
                         status: 'completed'
                     });
@@ -551,7 +703,7 @@ createApp({
             } else if (data.type === STREAM_TYPES.ERROR) {
                 aiMsg.timeline.push({
                     type: 'error',
-                    message: data.message || '未知错误',
+                    message: data.message || data.content || '未知错误',
                     detail: data.detail || '',
                     code: data.code || ''
                 });
@@ -573,10 +725,10 @@ createApp({
         const stopMessage = async () => {
             if (!isSending.value) return;
 
-            // if (abortController) {
-            //     abortController.abort();
-            //     abortController = null;
-            // }
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+            }
 
             await APP_API.stopStream(backendUrl.value, currentChatId.value);
 
@@ -617,6 +769,7 @@ createApp({
         };
 
         const createNewChat = async () => {
+            if (!isAuthenticated.value) return;
             const existingNewChat = chatList.value.find(c => c.isNew);
             if (existingNewChat) {
                 currentChatId.value = existingNewChat.id;
@@ -624,9 +777,8 @@ createApp({
             }
 
             try {
-                const response = await fetch(`${backendUrl.value}/api/v1/session`, { method: 'POST' });
-                const result = await response.json();
-                const cid = result.data.conversationId;
+                const result = await APP_API.createSession(backendUrl.value);
+                const cid = result.conversationId;
                 const newChat = { id: cid, title: '新对话', messages: [], isNew: true };
                 chatList.value.unshift(newChat);
                 currentChatId.value = newChat.id;
@@ -735,6 +887,21 @@ createApp({
         });
 
         return {
+            authReady,
+            isAuthenticated,
+            authUser,
+            authMode,
+            authForm,
+            authError,
+            authLoading,
+            showPassword,
+            authTitle,
+            authSubtitle,
+            authSubmitLabel,
+            userInitial,
+            switchAuthMode,
+            submitAuth,
+            logout,
             toast,
             showToast,
             hideToast,

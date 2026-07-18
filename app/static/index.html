@@ -20,13 +20,109 @@
 </head>
 <body>
     <div id="app">
-        <div class="container">
+        <div v-if="!authReady" class="auth-loading">
+            <div class="auth-loading-mark">
+                <i class="fas fa-seedling"></i>
+            </div>
+        </div>
+
+        <div v-else-if="!isAuthenticated" class="auth-shell">
+            <div class="auth-brand-panel">
+                <div class="auth-logo-orbit">
+                    <img src="img/logo.png" alt="蜂巢智能" class="auth-logo-image">
+                </div>
+                <div class="auth-brand-copy">
+                    <p class="auth-kicker">APIs Agent Runtime</p>
+                    <h1>蜂巢智能</h1>
+                    <p>登录后继续你的会话、文件、任务和长期记忆。</p>
+                </div>
+            </div>
+
+            <form class="auth-card" @submit.prevent="submitAuth">
+                <div class="auth-tabs">
+                    <button type="button"
+                            :class="['auth-tab', { active: authMode === 'login' }]"
+                            @click="switchAuthMode('login')">
+                        登录
+                    </button>
+                    <button type="button"
+                            :class="['auth-tab', { active: authMode === 'register' }]"
+                            @click="switchAuthMode('register')">
+                        注册
+                    </button>
+                </div>
+
+                <div class="auth-heading">
+                    <h2>{{ authTitle }}</h2>
+                    <p>{{ authSubtitle }}</p>
+                </div>
+
+                <label class="auth-field">
+                    <span>用户名</span>
+                    <div class="auth-input-wrap">
+                        <i class="fas fa-user"></i>
+                        <input v-model.trim="authForm.username"
+                               type="text"
+                               autocomplete="username"
+                               placeholder="输入用户名">
+                    </div>
+                </label>
+
+                <label class="auth-field">
+                    <span>密码</span>
+                    <div class="auth-input-wrap">
+                        <i class="fas fa-lock"></i>
+                        <input v-model="authForm.password"
+                               :type="showPassword ? 'text' : 'password'"
+                               :autocomplete="authMode === 'login' ? 'current-password' : 'new-password'"
+                               placeholder="输入密码">
+                        <button type="button" class="auth-eye" @click="showPassword = !showPassword">
+                            <i :class="['fas', showPassword ? 'fa-eye-slash' : 'fa-eye']"></i>
+                        </button>
+                    </div>
+                </label>
+
+                <label v-if="authMode === 'register'" class="auth-field">
+                    <span>确认密码</span>
+                    <div class="auth-input-wrap">
+                        <i class="fas fa-shield-halved"></i>
+                        <input v-model="authForm.confirmPassword"
+                               :type="showPassword ? 'text' : 'password'"
+                               autocomplete="new-password"
+                               placeholder="再次输入密码">
+                    </div>
+                </label>
+
+                <div v-if="authError" class="auth-error">
+                    <i class="fas fa-circle-exclamation"></i>
+                    <span>{{ authError }}</span>
+                </div>
+
+                <button class="auth-submit" type="submit" :disabled="authLoading">
+                    <i v-if="authLoading" class="fas fa-spinner fa-spin"></i>
+                    <i v-else class="fas fa-arrow-right"></i>
+                    <span>{{ authLoading ? '处理中...' : authSubmitLabel }}</span>
+                </button>
+            </form>
+        </div>
+
+        <div v-else class="container">
             <!-- 左侧会话列表 -->
             <div class="sidebar">
                 <div class="sidebar-header">
                     <div class="app-title">
                         <span class="logo-icon">🌱</span>
                         <span class="title-text">蜂巢智能</span>
+                    </div>
+                    <div class="user-panel">
+                        <div class="user-avatar">{{ userInitial }}</div>
+                        <div class="user-meta">
+                            <span>{{ authUser?.username || '已登录用户' }}</span>
+                            <small>账号已登录</small>
+                        </div>
+                        <button class="logout-btn" @click="logout" title="退出登录">
+                            <i class="fas fa-right-from-bracket"></i>
+                        </button>
                     </div>
                     <button class="new-chat-btn" @click="createNewChat">
                         <i class="fas fa-plus"></i>
